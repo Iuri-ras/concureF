@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.text.method.ScrollingMovementMethod;
@@ -119,7 +120,7 @@ public class MainActivity extends AppCompatActivity implements
      * Initialize BLE Manager and set callbacks
      */
     private void initializeBleManager() {
-        bleManager = new BleManager(this);
+        bleManager = BleManager.getInstance(this);
         bleManager.setScanCallback(this);
         bleManager.setConnectionCallback(this);
     }
@@ -205,6 +206,15 @@ public class MainActivity extends AppCompatActivity implements
             messageLog.setText("Log cleared\n");
             scrollToBottom();
         });
+        
+        // Add dashboard button
+        MaterialButton dashboardButton = findViewById(R.id.dashboardButton);
+        if (dashboardButton != null) {
+            dashboardButton.setOnClickListener(v -> {
+                Intent intent = new Intent(this, DashboardActivity.class);
+                startActivity(intent);
+            });
+        }
     }
     
     /**
