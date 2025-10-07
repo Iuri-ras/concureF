@@ -5,12 +5,14 @@ import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.text.method.ScrollingMovementMethod;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -119,7 +121,7 @@ public class MainActivity extends AppCompatActivity implements
      * Initialize BLE Manager and set callbacks
      */
     private void initializeBleManager() {
-        bleManager = new BleManager(this);
+        bleManager = BleManager.getInstance(this);
         bleManager.setScanCallback(this);
         bleManager.setConnectionCallback(this);
     }
@@ -205,6 +207,15 @@ public class MainActivity extends AppCompatActivity implements
             messageLog.setText("Log cleared\n");
             scrollToBottom();
         });
+        
+        // Add dashboard button
+        MaterialButton dashboardButton = findViewById(R.id.dashboardButton);
+        if (dashboardButton != null) {
+            dashboardButton.setOnClickListener(v -> {
+                Intent intent = new Intent(this, DashboardActivity.class);
+                startActivity(intent);
+            });
+        }
     }
     
     /**
@@ -365,6 +376,14 @@ public class MainActivity extends AppCompatActivity implements
             connectionStatus.setText("Status: Connected");
             connectButton.setText("Disconnect");
             sendButton.setEnabled(true);
+            
+            // Update connection status icon
+            ImageView connectionStatusIcon = findViewById(R.id.connectionStatusIcon);
+            if (connectionStatusIcon != null) {
+                connectionStatusIcon.setImageResource(R.drawable.ic_bluetooth_connected);
+                connectionStatusIcon.setColorFilter(getResources().getColor(R.color.success_color, null));
+            }
+            
             logMessage("Connected to ESP32");
             Toast.makeText(this, "Connected to ESP32", Toast.LENGTH_SHORT).show();
         });
@@ -374,9 +393,17 @@ public class MainActivity extends AppCompatActivity implements
     public void onDisconnected() {
         runOnUiThread(() -> {
             connectionStatus.setText("Status: Disconnected");
-            connectButton.setText("Connect to Selected Device");
+            connectButton.setText("Connect");
             connectButton.setEnabled(selectedDevice != null);
             sendButton.setEnabled(false);
+            
+            // Update connection status icon
+            ImageView connectionStatusIcon = findViewById(R.id.connectionStatusIcon);
+            if (connectionStatusIcon != null) {
+                connectionStatusIcon.setImageResource(R.drawable.ic_bluetooth_disabled);
+                connectionStatusIcon.setColorFilter(getResources().getColor(R.color.error_color, null));
+            }
+            
             logMessage("Disconnected from ESP32");
             Toast.makeText(this, "Disconnected from ESP32", Toast.LENGTH_SHORT).show();
         });

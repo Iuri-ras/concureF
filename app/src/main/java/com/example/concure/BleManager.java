@@ -46,6 +46,9 @@ public class BleManager {
     // BLE scanning timeout (10 seconds)
     private static final long SCAN_PERIOD = 10000;
     
+    // Singleton instance
+    private static volatile BleManager instance;
+    
     private Context context;
     private BluetoothAdapter bluetoothAdapter;
     private BluetoothLeScanner bluetoothLeScanner;
@@ -72,24 +75,67 @@ public class BleManager {
         void onDataSent(boolean success);
     }
     
+    // Enhanced callback interfaces for Dashboard integration
+    public interface OnDeviceConnectedListener {
+        void onDeviceConnected(String deviceName, String deviceAddress);
+    }
+    
+    public interface OnDeviceDisconnectedListener {
+        void onDeviceDisconnected();
+    }
+    
+    public interface OnDataReceivedListener {
+        void onTemperatureReceived(float temperature);
+        void onHumidityReceived(float humidity);
+        void onRawDataReceived(String data);
+    }
+    
+    public interface OnConnectionStatusListener {
+        void onConnectionStatusChanged(boolean isConnected, String status);
+    }
+    
     private BleScanCallback scanCallback;
     private BleConnectionCallback connectionCallback;
+    
+    // Enhanced callback listeners for Dashboard
+    private OnDeviceConnectedListener deviceConnectedListener;
+    private OnDeviceDisconnectedListener deviceDisconnectedListener;
+    private OnDataReceivedListener dataReceivedListener;
+    private OnConnectionStatusListener connectionStatusListener;
+    
+    // Current connected device info
+    private String connectedDeviceName = "";
+    private String connectedDeviceAddress = "";
     
     // Map to store discovered devices with their RSSI values
     private Map<String, BluetoothDevice> discoveredDevices = new HashMap<>();
     
-    public BleManager(Context context) {
-        this.context = context;
+    private BleManager(Context context) {
+        this.context = context.getApplicationContext(); // Use application context to avoid memory leaks
         this.handler = new Handler(Looper.getMainLooper());
         
         // Initialize Bluetooth adapter
-        BluetoothManager bluetoothManager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
+        BluetoothManager bluetoothManager = (BluetoothManager) this.context.getSystemService(Context.BLUETOOTH_SERVICE);
         if (bluetoothManager != null) {
             bluetoothAdapter = bluetoothManager.getAdapter();
             if (bluetoothAdapter != null) {
                 bluetoothLeScanner = bluetoothAdapter.getBluetoothLeScanner();
             }
         }
+    }
+    
+    /**
+     * Get singleton instance of BleManager
+     */
+    public static BleManager getInstance(Context context) {
+        if (instance == null) {
+            synchronized (BleManager.class) {
+                if (instance == null) {
+                    instance = new BleManager(context);
+                }
+            }
+        }
+        return instance;
     }
     
     /**
@@ -104,6 +150,34 @@ public class BleManager {
      */
     public void setConnectionCallback(BleConnectionCallback callback) {
         this.connectionCallback = callback;
+    }
+    
+    /**
+     * Set callback for device connected events
+     */
+    public void setOnDeviceConnectedListener(OnDeviceConnectedListener listener) {
+        this.deviceConnectedListener = listener;
+    }
+    
+    /**
+     * Set callback for device disconnected events
+     */
+    public void setOnDeviceDisconnectedListener(OnDeviceDisconnectedListener listener) {
+        this.deviceDisconnectedListener = listener;
+    }
+    
+    /**
+     * Set callback for data received events
+     */
+    public void setOnDataReceivedListener(OnDataReceivedListener listener) {
+        this.dataReceivedListener = listener;
+    }
+    
+    /**
+     * Set callback for connection status changes
+     */
+    public void setOnConnectionStatusListener(OnConnectionStatusListener listener) {
+        this.connectionStatusListener = listener;
     }
     
     /**
@@ -331,6 +405,20 @@ public class BleManager {
     }
     
     /**
+     * Get connected device name
+     */
+    public String getConnectedDeviceName() {
+        return connectedDeviceName;
+    }
+    
+    /**
+     * Get connected device address
+     */
+    public String getConnectedDeviceAddress() {
+        return connectedDeviceAddress;
+    }
+    
+    /**
      * Check if required permissions are granted
      */
     private boolean hasRequiredPermissions() {
@@ -439,6 +527,20 @@ public class BleManager {
                 Log.d(TAG, "Connected to GATT server");
                 isConnected = true;
                 
+                // Store connected device info
+                BluetoothDevice device = gatt.getDevice();
+                connectedDeviceName = device.getName() != null ? device.getName() : "ESP32";
+                connectedDeviceAddress = device.getAddress();
+                
+                // Notify connection status listeners
+                if (connectionStatusListener != null) {
+                    connectionStatusListener.onConnectionStatusChanged(true, "Connected to " + connectedDeviceName);
+                }
+                
+                if (deviceConnectedListener != null) {
+                    deviceConnectedListener.onDeviceConnected(connectedDeviceName, connectedDeviceAddress);
+                }
+                
                 // Discover services
                 gatt.discoverServices();
                 
@@ -449,6 +551,19 @@ public class BleManager {
                 Log.d(TAG, "Disconnected from GATT server");
                 isConnected = false;
                 characteristic = null;
+                
+                // Clear connected device info
+                connectedDeviceName = "";
+                connectedDeviceAddress = "";
+                
+                // Notify disconnection listeners
+                if (connectionStatusListener != null) {
+                    connectionStatusListener.onConnectionStatusChanged(false, "Disconnected");
+                }
+                
+                if (deviceDisconnectedListener != null) {
+                    deviceDisconnectedListener.onDeviceDisconnected();
+                }
                 
                 if (connectionCallback != null) {
                     connectionCallback.onDisconnected();
@@ -505,6 +620,9 @@ public class BleManager {
             
             Log.d(TAG, "Data received: " + receivedData);
             
+            // Parse ESP32 data and notify listeners
+            parseAndNotifyData(receivedData);
+            
             if (connectionCallback != null) {
                 connectionCallback.onDataReceived(receivedData);
             }
@@ -519,6 +637,41 @@ public class BleManager {
             }
         }
     };
+    
+    /**
+     * Parse ESP32 data and notify listeners
+     */
+    private void parseAndNotifyData(String data) {
+        if (dataReceivedListener == null) return;
+        
+        try {
+            // Parse temperature data (format: "Temp: 25.5°C")
+            if (data.contains("Temp:")) {
+                String tempStr = data.substring(data.indexOf("Temp:") + 5);
+                tempStr = tempStr.replace("°C", "").trim();
+                float temperature = Float.parseFloat(tempStr);
+                dataReceivedListener.onTemperatureReceived(temperature);
+                Log.d(TAG, "Parsed temperature: " + temperature + "°C");
+            }
+            
+            // Parse humidity data (format: "Humidity: 65.2%")
+            if (data.contains("Humidity:")) {
+                String humidityStr = data.substring(data.indexOf("Humidity:") + 9);
+                humidityStr = humidityStr.replace("%", "").trim();
+                float humidity = Float.parseFloat(humidityStr);
+                dataReceivedListener.onHumidityReceived(humidity);
+                Log.d(TAG, "Parsed humidity: " + humidity + "%");
+            }
+            
+            // Always notify raw data
+            dataReceivedListener.onRawDataReceived(data);
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Error parsing data: " + data, e);
+            // Still notify raw data even if parsing fails
+            dataReceivedListener.onRawDataReceived(data);
+        }
+    }
     
     /**
      * Clean up resources
