@@ -320,6 +320,7 @@ public class DashboardActivity extends AppCompatActivity implements
      */
     private void updateConnectionStatus(boolean connected, String status) {
         try {
+            Log.d(TAG, "updateConnectionStatus called: connected=" + connected + ", status=" + status);
             if (connected) {
                 if (binding.connectionStatusIcon != null) {
                     binding.connectionStatusIcon.setImageResource(R.drawable.ic_bluetooth_connected);
@@ -333,6 +334,7 @@ public class DashboardActivity extends AppCompatActivity implements
                 }
                 if (binding.connectButton != null) {
                     binding.connectButton.setText("Disconnect");
+                    Log.d(TAG, "Button text set to: Disconnect");
                 }
             } else {
                 if (binding.connectionStatusIcon != null) {
@@ -347,6 +349,7 @@ public class DashboardActivity extends AppCompatActivity implements
                 }
                 if (binding.connectButton != null) {
                     binding.connectButton.setText("Connect");
+                    Log.d(TAG, "Button text set to: Connect");
                 }
             }
         } catch (Exception e) {
@@ -770,7 +773,7 @@ public class DashboardActivity extends AppCompatActivity implements
     @Override
     public void onDeviceDisconnected() {
         runOnUiThread(() -> {
-            Log.d(TAG, "Device disconnected");
+            Log.d(TAG, "onDeviceDisconnected callback triggered");
             updateConnectionStatus(false, "Disconnected");
             Toast.makeText(this, "Disconnected from ESP32", Toast.LENGTH_SHORT).show();
         });
@@ -808,7 +811,7 @@ public class DashboardActivity extends AppCompatActivity implements
     @Override
     public void onConnectionStatusChanged(boolean isConnected, String status) {
         runOnUiThread(() -> {
-            Log.d(TAG, "Connection status changed: " + isConnected + " - " + status);
+            Log.d(TAG, "onConnectionStatusChanged callback triggered: " + isConnected + " - " + status);
             updateConnectionStatus(isConnected, status);
         });
     }

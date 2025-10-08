@@ -273,18 +273,45 @@ public class MainActivity extends AppCompatActivity implements
      * Start BLE scanning
      */
     private void startScanning() {
+        logMessage("🔍 Starting BLE scan process...");
+        
+        // Check Bluetooth availability
         if (!bleManager.isBluetoothAvailable()) {
-            Toast.makeText(this, "Bluetooth is not available", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Bluetooth is not available or enabled", Toast.LENGTH_LONG).show();
+            logMessage("❌ Bluetooth is not available or enabled");
+            logMessage("💡 Please enable Bluetooth in device settings");
             return;
         }
+        
+        // Check BLE support
+        if (!bleManager.isBleSupported()) {
+            Toast.makeText(this, "BLE is not supported on this device", Toast.LENGTH_LONG).show();
+            logMessage("❌ BLE is not supported on this device");
+            return;
+        }
+        
+        // Check permissions
+        if (!hasRequiredPermissions()) {
+            Toast.makeText(this, "BLE permissions required. Please grant permissions.", Toast.LENGTH_LONG).show();
+            logMessage("❌ BLE permissions not granted");
+            logMessage("💡 Grant Bluetooth and Location permissions");
+            requestPermissions();
+            return;
+        }
+        
+        // Try to enable BLE if needed
+        bleManager.enableBle();
         
         deviceAdapter.clearDevices();
         selectedDevice = null;
         connectButton.setEnabled(false);
         
         scanButton.setText("Stop Scanning");
-        logMessage("Starting BLE scan...");
-        logMessage("Looking for devices with name containing 'ESP32' or service UUID: 4fafc201-1fb5-459e-8fcc-c5c9c331914b");
+        logMessage("✅ All checks passed - starting scan");
+        logMessage("📡 Looking for ESP32 devices and all BLE devices");
+        logMessage("💡 Make sure your ESP32 is powered on and advertising");
+        logMessage("⏱️ Scan will run for 10 seconds");
+        
         bleManager.startScan();
     }
     
@@ -293,7 +320,15 @@ public class MainActivity extends AppCompatActivity implements
      */
     private void startScanningWithoutFilters() {
         if (!bleManager.isBluetoothAvailable()) {
-            Toast.makeText(this, "Bluetooth is not available", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Bluetooth is not available or enabled", Toast.LENGTH_LONG).show();
+            logMessage("❌ Bluetooth is not available or enabled");
+            return;
+        }
+        
+        if (!hasRequiredPermissions()) {
+            Toast.makeText(this, "BLE permissions required. Please grant permissions.", Toast.LENGTH_LONG).show();
+            logMessage("❌ BLE permissions not granted");
+            requestPermissions();
             return;
         }
         
@@ -302,8 +337,9 @@ public class MainActivity extends AppCompatActivity implements
         connectButton.setEnabled(false);
         
         scanButton.setText("Stop Scanning");
-        logMessage("Starting BLE scan WITHOUT filters (fallback mode)...");
-        logMessage("This will show ALL BLE devices - look for ESP32-ConCure");
+        logMessage("🔍 Starting BLE scan WITHOUT filters (fallback mode)...");
+        logMessage("📡 This will show ALL BLE devices - look for ESP32 devices");
+        logMessage("💡 Long-press scan button for this fallback mode");
         Toast.makeText(this, "Scanning without filters - check log for all devices", Toast.LENGTH_LONG).show();
         bleManager.startScanWithoutFilters();
     }
@@ -348,7 +384,8 @@ public class MainActivity extends AppCompatActivity implements
     @Override
     public void onScanStarted() {
         runOnUiThread(() -> {
-            logMessage("BLE scan started");
+            logMessage("✅ BLE scan started successfully");
+            logMessage("📡 Scanner is now active - waiting for devices...");
         });
     }
     
@@ -356,7 +393,14 @@ public class MainActivity extends AppCompatActivity implements
     public void onScanStopped() {
         runOnUiThread(() -> {
             scanButton.setText("Scan for ESP32 Devices");
-            logMessage("BLE scan stopped");
+            logMessage("⏹️ BLE scan stopped");
+            logMessage("📊 Total devices found: " + deviceAdapter.getItemCount());
+            if (deviceAdapter.getItemCount() == 0) {
+                logMessage("❌ No devices found - check the troubleshooting tips below");
+                logMessage("💡 Make sure ESP32 is powered on and advertising");
+                logMessage("💡 Try moving closer to the ESP32 device");
+                logMessage("💡 Check if other BLE apps can see devices");
+            }
         });
     }
     

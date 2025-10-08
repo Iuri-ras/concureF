@@ -70,7 +70,7 @@ public class DeviceAdapter extends RecyclerView.Adapter<DeviceAdapter.DeviceView
     @Override
     public DeviceViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
         View view = LayoutInflater.from(parent.getContext())
-                .inflate(android.R.layout.simple_list_item_2, parent, false);
+                .inflate(R.layout.item_device, parent, false);
         return new DeviceViewHolder(view);
     }
     
@@ -119,10 +119,16 @@ public class DeviceAdapter extends RecyclerView.Adapter<DeviceAdapter.DeviceView
         // Highlight selected device and ESP32 devices
         if (position == selectedPosition) {
             holder.itemView.setBackgroundColor(0xFFE3F2FD); // Light blue background
+            holder.deviceName.setTextColor(0xFF1976D2); // Dark blue text for selected
+            holder.deviceRssi.setTextColor(0xFF1976D2); // Dark blue text for selected
         } else if (isEsp32) {
             holder.itemView.setBackgroundColor(0xFFE8F5E8); // Light green background for ESP32
+            holder.deviceName.setTextColor(0xFF1A1A1A); // Dark text for better visibility
+            holder.deviceRssi.setTextColor(0xFF666666); // Secondary text color
         } else {
             holder.itemView.setBackgroundColor(0xFFFFFFFF); // White background
+            holder.deviceName.setTextColor(0xFF1A1A1A); // Dark text for better visibility
+            holder.deviceRssi.setTextColor(0xFF666666); // Secondary text color
         }
     }
     
@@ -137,8 +143,8 @@ public class DeviceAdapter extends RecyclerView.Adapter<DeviceAdapter.DeviceView
         
         DeviceViewHolder(@NonNull View itemView) {
             super(itemView);
-            deviceName = itemView.findViewById(android.R.id.text1);
-            deviceRssi = itemView.findViewById(android.R.id.text2);
+            deviceName = itemView.findViewById(R.id.deviceName);
+            deviceRssi = itemView.findViewById(R.id.deviceRssi);
             
             itemView.setOnClickListener(v -> {
                 int position = getAdapterPosition();

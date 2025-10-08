@@ -1,6 +1,7 @@
 package com.example.concure.data;
 
 import androidx.room.Entity;
+import androidx.room.Ignore;
 import androidx.room.PrimaryKey;
 
 /**
@@ -26,6 +27,7 @@ public class CuringSession {
         this.targetMaturity = 1000.0f; // Typical target for 28-day equivalent
     }
     
+    @Ignore
     public CuringSession(long startTimestamp, float targetMaturity) {
         this.startTimestamp = startTimestamp;
         this.targetMaturity = targetMaturity;

@@ -1,6 +1,7 @@
 package com.example.concure.data;
 
 import androidx.room.Entity;
+import androidx.room.Ignore;
 import androidx.room.PrimaryKey;
 
 /**
@@ -21,6 +22,7 @@ public class SensorReading {
         this.timestamp = System.currentTimeMillis();
     }
     
+    @Ignore
     public SensorReading(float temperature, float humidity, boolean isCuringActive) {
         this.timestamp = System.currentTimeMillis();
         this.temperature = temperature;

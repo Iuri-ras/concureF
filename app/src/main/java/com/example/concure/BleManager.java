@@ -15,6 +15,7 @@ import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanFilter;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
+import android.bluetooth.le.ScanRecord;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.os.Handler;
@@ -184,7 +185,48 @@ public class BleManager {
      * Check if Bluetooth is available and enabled
      */
     public boolean isBluetoothAvailable() {
-        return bluetoothAdapter != null && bluetoothAdapter.isEnabled();
+        boolean adapterExists = bluetoothAdapter != null;
+        boolean adapterEnabled = adapterExists && bluetoothAdapter.isEnabled();
+        boolean leScannerExists = bluetoothLeScanner != null;
+        
+        Log.d(TAG, "Bluetooth check - Adapter exists: " + adapterExists + 
+                   ", Enabled: " + adapterEnabled + 
+                   ", LE Scanner exists: " + leScannerExists);
+        
+        return adapterEnabled;
+    }
+    
+    /**
+     * Check if BLE is supported on this device
+     */
+    public boolean isBleSupported() {
+        if (bluetoothAdapter == null) {
+            Log.e(TAG, "Bluetooth adapter is null");
+            return false;
+        }
+        
+        boolean leSupported = bluetoothLeScanner != null;
+        Log.d(TAG, "BLE supported: " + leSupported);
+        return leSupported;
+    }
+    
+    /**
+     * Enable Bluetooth if it's not already enabled
+     */
+    @SuppressLint("MissingPermission")
+    public void enableBle() {
+        if (bluetoothAdapter != null && !bluetoothAdapter.isEnabled()) {
+            Log.d(TAG, "Enabling Bluetooth...");
+            try {
+                bluetoothAdapter.enable();
+                // Wait a bit for Bluetooth to enable
+                handler.postDelayed(() -> {
+                    Log.d(TAG, "Bluetooth enable attempt completed");
+                }, 2000);
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to enable Bluetooth: " + e.getMessage());
+            }
+        }
     }
     
     /**
@@ -208,7 +250,10 @@ public class BleManager {
      */
     @SuppressLint("MissingPermission")
     private void startScanInternal(boolean useFilters) {
+        Log.d(TAG, "=== STARTING BLE SCAN ===");
+        
         if (!isBluetoothAvailable()) {
+            Log.e(TAG, "Bluetooth is not available or enabled");
             if (scanCallback != null) {
                 scanCallback.onScanError("Bluetooth is not available or enabled");
             }
@@ -216,6 +261,7 @@ public class BleManager {
         }
         
         if (bluetoothLeScanner == null) {
+            Log.e(TAG, "BLE Scanner is null");
             if (scanCallback != null) {
                 scanCallback.onScanError("BLE Scanner is not available");
             }
@@ -224,6 +270,7 @@ public class BleManager {
         
         // Check permissions
         if (!hasRequiredPermissions()) {
+            Log.e(TAG, "Required permissions not granted");
             if (scanCallback != null) {
                 scanCallback.onScanError("Required permissions not granted");
             }
@@ -231,6 +278,7 @@ public class BleManager {
         }
         
         if (isScanning) {
+            Log.d(TAG, "Already scanning, stopping previous scan");
             stopScan();
         }
         
@@ -241,37 +289,77 @@ public class BleManager {
             scanCallback.onScanStarted();
         }
         
-        // Create scan settings for better performance
-        ScanSettings settings = new ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                .setReportDelay(0)
-                .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
-                .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
-                .build();
+        // Try multiple scan configurations for maximum compatibility
+        tryMultipleScanConfigurations();
+    }
+    
+    /**
+     * Try multiple scan configurations to find one that works
+     */
+    @SuppressLint("MissingPermission")
+    private void tryMultipleScanConfigurations() {
+        Log.d(TAG, "Trying multiple scan configurations...");
         
-        // Always scan without filters for maximum compatibility (like nRF Connect)
-        Log.d(TAG, "Starting scan without filters (nRF Connect style)");
-        bluetoothLeScanner.startScan(null, settings, leScanCallback);
+        // Configuration 1: Basic scan (most compatible)
+        try {
+            Log.d(TAG, "Trying basic scan configuration...");
+            ScanSettings basicSettings = new ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
+                    .build();
+            
+            bluetoothLeScanner.startScan(null, basicSettings, leScanCallback);
+            Log.d(TAG, "Basic scan started successfully");
+            
+            // Stop scanning after timeout
+            handler.postDelayed(this::stopScan, SCAN_PERIOD);
+            return;
+        } catch (Exception e) {
+            Log.e(TAG, "Basic scan failed: " + e.getMessage());
+        }
         
-        // Also try the most basic scan possible as backup
-        handler.postDelayed(() -> {
-            if (isScanning) {
-                Log.d(TAG, "Starting backup scan with minimal settings...");
-                ScanSettings basicSettings = new ScanSettings.Builder()
-                        .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
-                        .build();
-                try {
-                    bluetoothLeScanner.startScan(null, basicSettings, leScanCallback);
-                } catch (Exception e) {
-                    Log.e(TAG, "Backup scan failed: " + e.getMessage());
-                }
-            }
-        }, 2000); // Start backup scan after 2 seconds
+        // Configuration 2: Balanced scan
+        try {
+            Log.d(TAG, "Trying balanced scan configuration...");
+            ScanSettings balancedSettings = new ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
+                    .setReportDelay(0)
+                    .build();
+            
+            bluetoothLeScanner.startScan(null, balancedSettings, leScanCallback);
+            Log.d(TAG, "Balanced scan started successfully");
+            
+            // Stop scanning after timeout
+            handler.postDelayed(this::stopScan, SCAN_PERIOD);
+            return;
+        } catch (Exception e) {
+            Log.e(TAG, "Balanced scan failed: " + e.getMessage());
+        }
         
-        // Stop scanning after timeout
-        handler.postDelayed(this::stopScan, SCAN_PERIOD);
+        // Configuration 3: High power scan
+        try {
+            Log.d(TAG, "Trying high power scan configuration...");
+            ScanSettings highPowerSettings = new ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                    .setReportDelay(0)
+                    .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+                    .build();
+            
+            bluetoothLeScanner.startScan(null, highPowerSettings, leScanCallback);
+            Log.d(TAG, "High power scan started successfully");
+            
+            // Stop scanning after timeout
+            handler.postDelayed(this::stopScan, SCAN_PERIOD);
+            return;
+        } catch (Exception e) {
+            Log.e(TAG, "High power scan failed: " + e.getMessage());
+        }
         
-        Log.d(TAG, "BLE scan started");
+        // If all configurations fail
+        Log.e(TAG, "All scan configurations failed");
+        isScanning = false;
+        if (scanCallback != null) {
+            scanCallback.onScanError("All scan configurations failed - check device compatibility");
+        }
     }
     
     /**
@@ -334,6 +422,23 @@ public class BleManager {
         }
         isConnected = false;
         characteristic = null;
+        
+        // Clear connected device info
+        connectedDeviceName = "";
+        connectedDeviceAddress = "";
+        
+        // Notify disconnection listeners immediately
+        if (connectionStatusListener != null) {
+            connectionStatusListener.onConnectionStatusChanged(false, "Disconnected");
+        }
+        
+        if (deviceDisconnectedListener != null) {
+            deviceDisconnectedListener.onDeviceDisconnected();
+        }
+        
+        if (connectionCallback != null) {
+            connectionCallback.onDisconnected();
+        }
     }
     
     /**
@@ -422,9 +527,15 @@ public class BleManager {
      * Check if required permissions are granted
      */
     private boolean hasRequiredPermissions() {
-        return ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED &&
-               ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
-               ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+        boolean bluetoothConnect = ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
+        boolean bluetoothScan = ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED;
+        boolean location = ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+        
+        Log.d(TAG, "Permission check - BLUETOOTH_CONNECT: " + bluetoothConnect + 
+                   ", BLUETOOTH_SCAN: " + bluetoothScan + 
+                   ", ACCESS_FINE_LOCATION: " + location);
+        
+        return bluetoothConnect && bluetoothScan && location;
     }
     
     /**
@@ -434,74 +545,85 @@ public class BleManager {
         @Override
         @SuppressLint("MissingPermission")
         public void onScanResult(int callbackType, ScanResult result) {
-            BluetoothDevice device = result.getDevice();
-            String deviceName = device.getName();
-            int rssi = result.getRssi();
-            String deviceAddress = device.getAddress();
-            
-            // Log ALL discovered devices for comprehensive debugging
-            Log.d(TAG, "=== BLE DEVICE FOUND ===");
-            Log.d(TAG, "Name: " + (deviceName != null ? deviceName : "NULL"));
-            Log.d(TAG, "Address: " + deviceAddress);
-            Log.d(TAG, "RSSI: " + rssi);
-            Log.d(TAG, "Callback Type: " + callbackType);
-            
-            // Log scan record details
-            if (result.getScanRecord() != null) {
-                Log.d(TAG, "Scan Record exists");
-                List<android.os.ParcelUuid> serviceUuids = result.getScanRecord().getServiceUuids();
-                if (serviceUuids != null && !serviceUuids.isEmpty()) {
-                    Log.d(TAG, "Service UUIDs found: " + serviceUuids.size());
-                    for (android.os.ParcelUuid uuid : serviceUuids) {
-                        Log.d(TAG, "  Service UUID: " + uuid.toString());
+            try {
+                BluetoothDevice device = result.getDevice();
+                String deviceName = null;
+                int rssi = result.getRssi();
+                String deviceAddress = device.getAddress();
+                
+                // Safely get device name
+                try {
+                    deviceName = device.getName();
+                } catch (SecurityException e) {
+                    Log.w(TAG, "Security exception getting device name: " + e.getMessage());
+                }
+                
+                // Log ALL discovered devices for comprehensive debugging
+                Log.d(TAG, "=== BLE DEVICE FOUND ===");
+                Log.d(TAG, "Name: " + (deviceName != null ? deviceName : "NULL"));
+                Log.d(TAG, "Address: " + deviceAddress);
+                Log.d(TAG, "RSSI: " + rssi);
+                Log.d(TAG, "Callback Type: " + callbackType);
+                
+                // Log scan record details
+                if (result.getScanRecord() != null) {
+                    Log.d(TAG, "Scan Record exists");
+                    List<android.os.ParcelUuid> serviceUuids = result.getScanRecord().getServiceUuids();
+                    if (serviceUuids != null && !serviceUuids.isEmpty()) {
+                        Log.d(TAG, "Service UUIDs found: " + serviceUuids.size());
+                        for (android.os.ParcelUuid uuid : serviceUuids) {
+                            Log.d(TAG, "  Service UUID: " + uuid.toString());
+                        }
+                    } else {
+                        Log.d(TAG, "No service UUIDs in scan record");
                     }
                 } else {
-                    Log.d(TAG, "No service UUIDs in scan record");
+                    Log.d(TAG, "No scan record");
                 }
-            } else {
-                Log.d(TAG, "No scan record");
-            }
-            Log.d(TAG, "========================");
-            
-            // Check if device name contains "ESP32" (case insensitive)
-            boolean isEsp32 = false;
-            if (deviceName != null) {
-                isEsp32 = deviceName.toLowerCase().contains("esp32");
-                Log.d(TAG, "Name check - contains 'esp32': " + isEsp32);
-            } else {
-                Log.d(TAG, "Device name is NULL");
-            }
-            
-            // Also check if the device has our service UUID in the scan record
-            if (!isEsp32 && result.getScanRecord() != null) {
-                List<android.os.ParcelUuid> serviceUuids = result.getScanRecord().getServiceUuids();
-                if (serviceUuids != null) {
-                    for (android.os.ParcelUuid uuid : serviceUuids) {
-                        String uuidStr = uuid.toString().toLowerCase().replace("-", "");
-                        String targetUuid = SERVICE_UUID.toLowerCase().replace("-", "");
-                        Log.d(TAG, "Comparing UUIDs: " + uuidStr + " vs " + targetUuid);
-                        if (uuidStr.contains(targetUuid)) {
-                            isEsp32 = true;
-                            Log.d(TAG, "Found ESP32 by service UUID: " + deviceName);
-                            break;
+                Log.d(TAG, "========================");
+                
+                // Check if device name contains "ESP32" (case insensitive)
+                boolean isEsp32 = false;
+                if (deviceName != null && !deviceName.isEmpty()) {
+                    isEsp32 = deviceName.toLowerCase().contains("esp32");
+                    Log.d(TAG, "Name check - contains 'esp32': " + isEsp32);
+                } else {
+                    Log.d(TAG, "Device name is NULL or empty");
+                }
+                
+                // Also check if the device has our service UUID in the scan record
+                if (!isEsp32 && result.getScanRecord() != null) {
+                    List<android.os.ParcelUuid> serviceUuids = result.getScanRecord().getServiceUuids();
+                    if (serviceUuids != null) {
+                        for (android.os.ParcelUuid uuid : serviceUuids) {
+                            String uuidStr = uuid.toString().toLowerCase().replace("-", "");
+                            String targetUuid = SERVICE_UUID.toLowerCase().replace("-", "");
+                            Log.d(TAG, "Comparing UUIDs: " + uuidStr + " vs " + targetUuid);
+                            if (uuidStr.contains(targetUuid)) {
+                                isEsp32 = true;
+                                Log.d(TAG, "Found ESP32 by service UUID: " + deviceName);
+                                break;
+                            }
                         }
                     }
                 }
-            }
-            
-            // Show ALL devices in the UI (like nRF Connect)
-            if (scanCallback != null) {
-                scanCallback.onDeviceFound(device, rssi);
-            }
-            
-            // Add ALL devices to discovered devices list
-            if (!discoveredDevices.containsKey(deviceAddress)) {
-                discoveredDevices.put(deviceAddress, device);
-                if (isEsp32) {
-                    Log.d(TAG, "Added ESP32 to discovered devices: " + deviceName);
-                } else {
-                    Log.d(TAG, "Added device to discovered devices: " + deviceName);
+                
+                // Show ALL devices in the UI (like nRF Connect)
+                if (scanCallback != null) {
+                    scanCallback.onDeviceFound(device, rssi);
                 }
+                
+                // Add ALL devices to discovered devices list
+                if (!discoveredDevices.containsKey(deviceAddress)) {
+                    discoveredDevices.put(deviceAddress, device);
+                    if (isEsp32) {
+                        Log.d(TAG, "Added ESP32 to discovered devices: " + deviceName);
+                    } else {
+                        Log.d(TAG, "Added device to discovered devices: " + deviceName);
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Error processing scan result: " + e.getMessage(), e);
             }
         }
         

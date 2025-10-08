@@ -187,8 +187,9 @@
                     android:id="@+id/deviceList"
                     android:layout_width="match_parent"
                     android:layout_height="200dp"
-                    android:background="@color/status_card_background"
-                    android:padding="8dp" />
+                    android:background="@color/card_background"
+                    android:padding="8dp"
+                    android:clipToPadding="false" />
 
             </LinearLayout>
 
