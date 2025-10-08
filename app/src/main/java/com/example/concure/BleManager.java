@@ -767,22 +767,46 @@ public class BleManager {
         if (dataReceivedListener == null) return;
         
         try {
-            // Parse temperature data (format: "Temp: 25.5°C")
-            if (data.contains("Temp:")) {
-                String tempStr = data.substring(data.indexOf("Temp:") + 5);
-                tempStr = tempStr.replace("°C", "").trim();
+            Log.d(TAG, "Parsing data: " + data);
+            
+            // Handle new ESP32 format: "T:24.1", "H:59.6", "B:82"
+            if (data.startsWith("T:")) {
+                // Parse temperature
+                String tempStr = data.substring(2).trim();
                 float temperature = Float.parseFloat(tempStr);
                 dataReceivedListener.onTemperatureReceived(temperature);
                 Log.d(TAG, "Parsed temperature: " + temperature + "°C");
-            }
-            
-            // Parse humidity data (format: "Humidity: 65.2%")
-            if (data.contains("Humidity:")) {
-                String humidityStr = data.substring(data.indexOf("Humidity:") + 9);
-                humidityStr = humidityStr.replace("%", "").trim();
-                float humidity = Float.parseFloat(humidityStr);
+                
+            } else if (data.startsWith("H:")) {
+                // Parse humidity
+                String humStr = data.substring(2).trim();
+                float humidity = Float.parseFloat(humStr);
                 dataReceivedListener.onHumidityReceived(humidity);
                 Log.d(TAG, "Parsed humidity: " + humidity + "%");
+                
+            } else if (data.startsWith("B:")) {
+                // Parse battery
+                String batteryStr = data.substring(2).trim();
+                int battery = Integer.parseInt(batteryStr);
+                Log.d(TAG, "Parsed battery: " + battery + "%");
+                
+            } else {
+                // Handle legacy format for backward compatibility
+                if (data.contains("Temp:")) {
+                    String tempStr = data.substring(data.indexOf("Temp:") + 5);
+                    tempStr = tempStr.replace("°C", "").trim();
+                    float temperature = Float.parseFloat(tempStr);
+                    dataReceivedListener.onTemperatureReceived(temperature);
+                    Log.d(TAG, "Parsed temperature (legacy): " + temperature + "°C");
+                }
+                
+                if (data.contains("Humidity:")) {
+                    String humidityStr = data.substring(data.indexOf("Humidity:") + 9);
+                    humidityStr = humidityStr.replace("%", "").trim();
+                    float humidity = Float.parseFloat(humidityStr);
+                    dataReceivedListener.onHumidityReceived(humidity);
+                    Log.d(TAG, "Parsed humidity (legacy): " + humidity + "%");
+                }
             }
             
             // Always notify raw data

@@ -3,6 +3,7 @@ package com.example.concure.data;
 import androidx.room.Entity;
 import androidx.room.Ignore;
 import androidx.room.PrimaryKey;
+import com.example.concure.prediction.MaturityCalculator;
 
 /**
  * Entity class for storing curing sessions
@@ -24,7 +25,7 @@ public class CuringSession {
         this.startTimestamp = System.currentTimeMillis();
         this.isActive = true;
         this.currentMaturity = 0.0f;
-        this.targetMaturity = 1000.0f; // Typical target for 28-day equivalent
+        this.targetMaturity = MaturityCalculator.getDefaultTargetMaturity(); // Updated to use new default
     }
     
     @Ignore
@@ -33,6 +34,29 @@ public class CuringSession {
         this.targetMaturity = targetMaturity;
         this.isActive = true;
         this.currentMaturity = 0.0f;
+    }
+    
+    @Ignore
+    public CuringSession(long startTimestamp, int targetDays) {
+        this.startTimestamp = startTimestamp;
+        this.isActive = true;
+        this.currentMaturity = 0.0f;
+        
+        // Set target maturity based on curing period
+        switch (targetDays) {
+            case 7:
+                this.targetMaturity = MaturityCalculator.get7DayTargetMaturity();
+                break;
+            case 14:
+                this.targetMaturity = MaturityCalculator.get14DayTargetMaturity();
+                break;
+            case 28:
+                this.targetMaturity = MaturityCalculator.get28DayTargetMaturity();
+                break;
+            default:
+                this.targetMaturity = MaturityCalculator.getDefaultTargetMaturity();
+                break;
+        }
     }
     
     // Getters and setters
@@ -64,5 +88,53 @@ public class CuringSession {
     public float getCompletionPercentage() {
         if (targetMaturity <= 0) return 0;
         return Math.min(100.0f, (currentMaturity / targetMaturity) * 100.0f);
+    }
+    
+    /**
+     * Get the curing stage description based on current maturity
+     * @return Curing stage description
+     */
+    public String getCuringStage() {
+        return MaturityCalculator.getCuringStage(currentMaturity);
+    }
+    
+    /**
+     * Check if the session has reached 7-day equivalent strength
+     * @return true if 7-day strength is achieved
+     */
+    public boolean hasReached7DayStrength() {
+        return MaturityCalculator.hasReachedTargetStrength(currentMaturity, 7);
+    }
+    
+    /**
+     * Check if the session has reached 14-day equivalent strength
+     * @return true if 14-day strength is achieved
+     */
+    public boolean hasReached14DayStrength() {
+        return MaturityCalculator.hasReachedTargetStrength(currentMaturity, 14);
+    }
+    
+    /**
+     * Check if the session has reached 28-day equivalent strength
+     * @return true if 28-day strength is achieved
+     */
+    public boolean hasReached28DayStrength() {
+        return MaturityCalculator.hasReachedTargetStrength(currentMaturity, 28);
+    }
+    
+    /**
+     * Get the target curing period in days based on target maturity
+     * @return Target curing period (7, 14, or 28 days)
+     */
+    public int getTargetCuringPeriod() {
+        if (Math.abs(targetMaturity - MaturityCalculator.get7DayTargetMaturity()) < 50.0f) {
+            return 7;
+        } else if (Math.abs(targetMaturity - MaturityCalculator.get14DayTargetMaturity()) < 50.0f) {
+            return 14;
+        } else if (Math.abs(targetMaturity - MaturityCalculator.get28DayTargetMaturity()) < 50.0f) {
+            return 28;
+        } else {
+            return 28; // Default to 28-day
+        }
     }
 }

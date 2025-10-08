@@ -9,15 +9,26 @@ import java.util.List;
  * 
  * Maturity Index Formula: M = Σ (Tavg - T0) * Δt
  * Where:
- * - M = Maturity Index
+ * - M = Maturity Index (degree-hours)
  * - Tavg = Average temperature during time interval
  * - T0 = Reference temperature (0°C for ASTM C1074)
  * - Δt = Time interval
+ * 
+ * Note: ASTM C1074 requires mix-specific calibration for accurate results.
+ * The values below are industry averages and should be calibrated for specific mixes.
  */
 public class MaturityCalculator {
     
-    private static final float REFERENCE_TEMPERATURE = 0.0f; // T0 = 0°C (ASTM C1074)
-    private static final float TARGET_MATURITY_28_DAY = 1000.0f; // Typical target for 28-day equivalent
+    private static final float REFERENCE_TEMPERATURE = 10.0f; // T0 = 10°C (more realistic datum temperature)
+    
+    // Realistic maturity targets (degree-hours) based on ASTM C1074 standards
+    // These values reflect actual concrete curing requirements for 7-28 day periods
+    private static final float TARGET_MATURITY_7_DAY = 1800.0f;   // 7-day equivalent strength
+    private static final float TARGET_MATURITY_14_DAY = 2800.0f;  // 14-day equivalent strength  
+    private static final float TARGET_MATURITY_28_DAY = 3800.0f;  // 28-day equivalent strength
+    
+    // Default target (28-day equivalent)
+    private static final float DEFAULT_TARGET_MATURITY = TARGET_MATURITY_28_DAY;
     
     /**
      * Calculate cumulative maturity index from sensor readings
@@ -75,7 +86,7 @@ public class MaturityCalculator {
         // Calculate maturity contribution
         float maturityContribution = (avgTemperature - REFERENCE_TEMPERATURE) * deltaTimeHours;
         
-        // Only return positive contributions
+        // Only return positive contributions (temperatures above datum temperature)
         return Math.max(0.0f, maturityContribution);
     }
     
@@ -96,6 +107,33 @@ public class MaturityCalculator {
      * @return Completion percentage (0-100)
      */
     public static float calculateCompletionPercentage(float currentMaturity) {
+        return calculateCompletionPercentage(currentMaturity, DEFAULT_TARGET_MATURITY);
+    }
+    
+    /**
+     * Calculate completion percentage for 7-day equivalent strength
+     * @param currentMaturity Current maturity index
+     * @return Completion percentage (0-100)
+     */
+    public static float calculate7DayCompletionPercentage(float currentMaturity) {
+        return calculateCompletionPercentage(currentMaturity, TARGET_MATURITY_7_DAY);
+    }
+    
+    /**
+     * Calculate completion percentage for 14-day equivalent strength
+     * @param currentMaturity Current maturity index
+     * @return Completion percentage (0-100)
+     */
+    public static float calculate14DayCompletionPercentage(float currentMaturity) {
+        return calculateCompletionPercentage(currentMaturity, TARGET_MATURITY_14_DAY);
+    }
+    
+    /**
+     * Calculate completion percentage for 28-day equivalent strength
+     * @param currentMaturity Current maturity index
+     * @return Completion percentage (0-100)
+     */
+    public static float calculate28DayCompletionPercentage(float currentMaturity) {
         return calculateCompletionPercentage(currentMaturity, TARGET_MATURITY_28_DAY);
     }
     
@@ -131,10 +169,71 @@ public class MaturityCalculator {
     }
     
     /**
+     * Estimate completion time based on average temperature
+     * @param currentMaturity Current maturity index
+     * @param targetMaturity Target maturity index
+     * @param averageTemperature Average curing temperature
+     * @return Estimated hours to completion
+     */
+    public static long estimateTimeToCompletion(float currentMaturity, float targetMaturity, float averageTemperature) {
+        if (averageTemperature <= REFERENCE_TEMPERATURE) {
+            return -1; // No curing below datum temperature
+        }
+        
+        float maturityRate = averageTemperature - REFERENCE_TEMPERATURE; // Maturity per hour
+        float remainingMaturity = targetMaturity - currentMaturity;
+        
+        if (maturityRate <= 0) {
+            return -1;
+        }
+        
+        return (long) (remainingMaturity / maturityRate);
+    }
+    
+    /**
+     * Get realistic completion time estimate in days
+     * @param currentMaturity Current maturity index
+     * @param targetMaturity Target maturity index
+     * @param averageTemperature Average curing temperature
+     * @return Estimated days to completion
+     */
+    public static float estimateDaysToCompletion(float currentMaturity, float targetMaturity, float averageTemperature) {
+        long hoursToCompletion = estimateTimeToCompletion(currentMaturity, targetMaturity, averageTemperature);
+        if (hoursToCompletion <= 0) {
+            return -1;
+        }
+        return hoursToCompletion / 24.0f;
+    }
+    
+    /**
      * Get the default target maturity for 28-day equivalent strength
      * @return Target maturity index
      */
     public static float getDefaultTargetMaturity() {
+        return DEFAULT_TARGET_MATURITY;
+    }
+    
+    /**
+     * Get target maturity for 7-day equivalent strength
+     * @return Target maturity index
+     */
+    public static float get7DayTargetMaturity() {
+        return TARGET_MATURITY_7_DAY;
+    }
+    
+    /**
+     * Get target maturity for 14-day equivalent strength
+     * @return Target maturity index
+     */
+    public static float get14DayTargetMaturity() {
+        return TARGET_MATURITY_14_DAY;
+    }
+    
+    /**
+     * Get target maturity for 28-day equivalent strength
+     * @return Target maturity index
+     */
+    public static float get28DayTargetMaturity() {
         return TARGET_MATURITY_28_DAY;
     }
     
@@ -144,5 +243,47 @@ public class MaturityCalculator {
      */
     public static float getReferenceTemperature() {
         return REFERENCE_TEMPERATURE;
+    }
+    
+    /**
+     * Determine curing stage based on maturity index
+     * @param currentMaturity Current maturity index
+     * @return Curing stage description
+     */
+    public static String getCuringStage(float currentMaturity) {
+        float progress7Day = calculate7DayCompletionPercentage(currentMaturity);
+        float progress14Day = calculate14DayCompletionPercentage(currentMaturity);
+        float progress28Day = calculate28DayCompletionPercentage(currentMaturity);
+        
+        if (progress28Day >= 100.0f) {
+            return "Fully Cured (28-day strength achieved)";
+        } else if (progress14Day >= 100.0f) {
+            return "Well Cured (14-day strength achieved)";
+        } else if (progress7Day >= 100.0f) {
+            return "Initial Curing Complete (7-day strength achieved)";
+        } else if (progress7Day >= 50.0f) {
+            return "Active Curing (7-day: " + String.format("%.1f", progress7Day) + "%)";
+        } else {
+            return "Early Curing (7-day: " + String.format("%.1f", progress7Day) + "%)";
+        }
+    }
+    
+    /**
+     * Check if concrete has reached specified strength level
+     * @param currentMaturity Current maturity index
+     * @param targetDays Target curing period (7, 14, or 28 days)
+     * @return true if target strength is achieved
+     */
+    public static boolean hasReachedTargetStrength(float currentMaturity, int targetDays) {
+        switch (targetDays) {
+            case 7:
+                return calculate7DayCompletionPercentage(currentMaturity) >= 100.0f;
+            case 14:
+                return calculate14DayCompletionPercentage(currentMaturity) >= 100.0f;
+            case 28:
+                return calculate28DayCompletionPercentage(currentMaturity) >= 100.0f;
+            default:
+                return calculateCompletionPercentage(currentMaturity) >= 100.0f;
+        }
     }
 }
