@@ -5,35 +5,51 @@ import java.util.List;
 
 /**
  * ASTM C1074 Maturity Method Calculator
- * Implements the maturity index calculation for concrete curing prediction
+ * Implements the Nurse-Saul maturity function for concrete curing prediction
  * 
- * Maturity Index Formula: M = Σ (Tavg - T0) * Δt
+ * Nurse-Saul Maturity Formula: M(t) = Σ (Ti - T0) * Δti
  * Where:
- * - M = Maturity Index (degree-hours)
- * - Tavg = Average temperature during time interval
- * - T0 = Reference temperature (0°C for ASTM C1074)
- * - Δt = Time interval
+ * - M(t) = Maturity Index (°C·h)
+ * - Ti = Temperature at time i
+ * - T0 = Datum temperature (0°C per ASTM C1074)
+ * - Δti = Time interval
+ * 
+ * Strength Calibration: Strength(M) = a * ln(M) + b
+ * Where a and b are mix-specific constants
  * 
  * Note: ASTM C1074 requires mix-specific calibration for accurate results.
  * The values below are industry averages and should be calibrated for specific mixes.
  */
 public class MaturityCalculator {
     
-    private static final float REFERENCE_TEMPERATURE = 10.0f; // T0 = 10°C (more realistic datum temperature)
+    private static final float DATUM_TEMPERATURE = 0.0f; // T0 = 0°C (ASTM C1074 standard)
     
-    // Realistic maturity targets (degree-hours) based on ASTM C1074 standards
-    // These values reflect actual concrete curing requirements for 7-28 day periods
-    private static final float TARGET_MATURITY_7_DAY = 1800.0f;   // 7-day equivalent strength
-    private static final float TARGET_MATURITY_14_DAY = 2800.0f;  // 14-day equivalent strength  
-    private static final float TARGET_MATURITY_28_DAY = 3800.0f;  // 28-day equivalent strength
+    // Strength calibration curve constants (default values, should be calibrated for specific mixes)
+    // Strength(M) = a * ln(M) + b
+    private static final float STRENGTH_CALIBRATION_A = 8.0f;  // Slope coefficient
+    private static final float STRENGTH_CALIBRATION_B = -20.0f; // Intercept coefficient
     
-    // Default target (28-day equivalent)
-    private static final float DEFAULT_TARGET_MATURITY = TARGET_MATURITY_28_DAY;
+    // Default target strength (MPa)
+    private static final float DEFAULT_TARGET_STRENGTH = 35.0f; // 35 MPa (high strength)
+    
+    // Realistic ASTM-based target maturities (°C·h) for different strength levels
+    private static final float TARGET_MATURITY_EARLY = 1500.0f;    // Early strength (10 MPa) - ~2 days @ 30°C
+    private static final float TARGET_MATURITY_DESIGN = 5000.0f;   // Design strength (28 MPa) - ~7 days @ 30°C
+    private static final float TARGET_MATURITY_HIGH = 7000.0f;     // High strength (35 MPa) - ~10 days @ 30°C
+    private static final float TARGET_MATURITY_FULL = 8500.0f;     // Full strength (40 MPa) - ~12 days @ 30°C
+    
+    // Legacy targets for backward compatibility
+    private static final float TARGET_MATURITY_7_DAY = TARGET_MATURITY_EARLY;   // Early strength
+    private static final float TARGET_MATURITY_14_DAY = TARGET_MATURITY_DESIGN; // Design strength  
+    private static final float TARGET_MATURITY_28_DAY = TARGET_MATURITY_FULL;   // Full strength
+    
+    // Default target (high strength - 35 MPa)
+    private static final float DEFAULT_TARGET_MATURITY = TARGET_MATURITY_HIGH;
     
     /**
-     * Calculate cumulative maturity index from sensor readings
+     * Calculate cumulative maturity index from sensor readings using proper time integration
      * @param readings List of sensor readings in chronological order
-     * @return Cumulative maturity index
+     * @return Cumulative maturity index in °C·h
      */
     public static float calculateMaturity(List<SensorReading> readings) {
         if (readings == null || readings.size() < 2) {
@@ -46,48 +62,49 @@ public class MaturityCalculator {
             SensorReading current = readings.get(i);
             SensorReading previous = readings.get(i - 1);
             
-            // Calculate time interval in hours
-            long timeDiff = current.getTimestamp() - previous.getTimestamp();
-            float deltaTimeHours = timeDiff / (1000.0f * 60.0f * 60.0f); // Convert ms to hours
+            // Calculate time interval in hours (proper time integration)
+            long timeDiffMs = current.getTimestamp() - previous.getTimestamp();
+            float deltaTimeHours = timeDiffMs / 3600000.0f; // Convert ms to hours (3600000 ms = 1 hour)
             
-            // Calculate average temperature
+            // Calculate average temperature for the interval
             float avgTemperature = (current.getTemperature() + previous.getTemperature()) / 2.0f;
             
-            // Calculate maturity contribution: (Tavg - T0) * Δt
-            float maturityContribution = (avgTemperature - REFERENCE_TEMPERATURE) * deltaTimeHours;
+            // Nurse-Saul equation: M = Σ(max(0, T_concrete - T0) × Δt_hours)
+            // Clamp negative contributions to 0
+            float maturityContribution = Math.max(0.0f, (avgTemperature - DATUM_TEMPERATURE) * deltaTimeHours);
+            totalMaturity += maturityContribution;
             
-            // Only add positive contributions (temperatures above 0°C)
-            if (maturityContribution > 0) {
-                totalMaturity += maturityContribution;
-            }
+            // Log detailed calculation for debugging
+            System.out.println(String.format("Δt_hours: %.4f, T_avg: %.1f°C, Maturity: %.2f °C·h, Total: %.2f °C·h", 
+                deltaTimeHours, avgTemperature, maturityContribution, totalMaturity));
         }
         
         return totalMaturity;
     }
     
     /**
-     * Calculate maturity from two consecutive readings
+     * Calculate maturity increment from two consecutive readings
      * @param previous Previous reading
      * @param current Current reading
-     * @return Maturity contribution
+     * @return Maturity contribution in °C·h
      */
     public static float calculateMaturityIncrement(SensorReading previous, SensorReading current) {
         if (previous == null || current == null) {
             return 0.0f;
         }
         
-        // Calculate time interval in hours
-        long timeDiff = current.getTimestamp() - previous.getTimestamp();
-        float deltaTimeHours = timeDiff / (1000.0f * 60.0f * 60.0f);
+        // Calculate time interval in hours (proper time integration)
+        long timeDiffMs = current.getTimestamp() - previous.getTimestamp();
+        float deltaTimeHours = timeDiffMs / 3600000.0f; // Convert ms to hours
         
-        // Calculate average temperature
+        // Calculate average temperature for the interval
         float avgTemperature = (current.getTemperature() + previous.getTemperature()) / 2.0f;
         
-        // Calculate maturity contribution
-        float maturityContribution = (avgTemperature - REFERENCE_TEMPERATURE) * deltaTimeHours;
+        // Nurse-Saul equation: M = max(0, T_concrete - T0) × Δt_hours
+        // Clamp negative contributions to 0
+        float maturityContribution = Math.max(0.0f, (avgTemperature - DATUM_TEMPERATURE) * deltaTimeHours);
         
-        // Only return positive contributions (temperatures above datum temperature)
-        return Math.max(0.0f, maturityContribution);
+        return maturityContribution;
     }
     
     /**
@@ -176,11 +193,11 @@ public class MaturityCalculator {
      * @return Estimated hours to completion
      */
     public static long estimateTimeToCompletion(float currentMaturity, float targetMaturity, float averageTemperature) {
-        if (averageTemperature <= REFERENCE_TEMPERATURE) {
+        if (averageTemperature <= DATUM_TEMPERATURE) {
             return -1; // No curing below datum temperature
         }
         
-        float maturityRate = averageTemperature - REFERENCE_TEMPERATURE; // Maturity per hour
+        float maturityRate = averageTemperature - DATUM_TEMPERATURE; // Maturity per hour
         float remainingMaturity = targetMaturity - currentMaturity;
         
         if (maturityRate <= 0) {
@@ -238,11 +255,154 @@ public class MaturityCalculator {
     }
     
     /**
-     * Get the reference temperature used in calculations
-     * @return Reference temperature in Celsius
+     * Get the datum temperature used in calculations (ASTM C1074 standard)
+     * @return Datum temperature in Celsius
      */
-    public static float getReferenceTemperature() {
-        return REFERENCE_TEMPERATURE;
+    public static float getDatumTemperature() {
+        return DATUM_TEMPERATURE;
+    }
+    
+    /**
+     * Calculate strength from maturity using calibration curve
+     * Strength(M) = a * ln(M) + b
+     * @param maturity Maturity index (°C·h)
+     * @return Estimated strength (MPa)
+     */
+    public static float calculateStrengthFromMaturity(float maturity) {
+        if (maturity <= 0) return 0.0f;
+        float strength = STRENGTH_CALIBRATION_A * (float) Math.log(maturity) + STRENGTH_CALIBRATION_B;
+        
+        // Debug logging
+        System.out.println(String.format("Strength calculation: Maturity=%.1f °C·h, ln(M)=%.3f, Strength=%.1f MPa", 
+            maturity, Math.log(maturity), strength));
+        
+        return strength;
+    }
+    
+    /**
+     * Calculate maturity from target strength using inverse calibration curve
+     * M = exp((Strength - b) / a)
+     * @param targetStrength Target strength (MPa)
+     * @return Required maturity (°C·h)
+     */
+    public static float calculateMaturityFromStrength(float targetStrength) {
+        if (targetStrength <= 0) return 0.0f;
+        return (float) Math.exp((targetStrength - STRENGTH_CALIBRATION_B) / STRENGTH_CALIBRATION_A);
+    }
+    
+    /**
+     * Calculate curing percentage based on strength achievement
+     * @param currentMaturity Current maturity index (°C·h)
+     * @param targetStrength Target strength (MPa)
+     * @return Curing percentage (0-100)
+     */
+    public static float calculateCuringPercentage(float currentMaturity, float targetStrength) {
+        if (targetStrength <= 0) return 0.0f;
+        
+        float currentStrength = calculateStrengthFromMaturity(currentMaturity);
+        float curingPercent = Math.min(100.0f, (currentStrength / targetStrength) * 100.0f);
+        
+        return Math.round(curingPercent);
+    }
+    
+    /**
+     * Calculate curing percentage with default target strength
+     * @param currentMaturity Current maturity index (°C·h)
+     * @return Curing percentage (0-100)
+     */
+    public static float calculateCuringPercentage(float currentMaturity) {
+        return calculateCuringPercentage(currentMaturity, DEFAULT_TARGET_STRENGTH);
+    }
+    
+    /**
+     * Get the default target strength
+     * @return Target strength (MPa)
+     */
+    public static float getDefaultTargetStrength() {
+        return DEFAULT_TARGET_STRENGTH;
+    }
+    
+    /**
+     * Calculate daily maturity gain at given average temperature
+     * @param avgTemperature Average temperature in °C
+     * @return Daily maturity gain in °C·h/day
+     */
+    public static float calculateDailyGain(float avgTemperature) {
+        // Daily gain = max(0, T_avg - T0) × 24 hours
+        return Math.max(0.0f, (avgTemperature - DATUM_TEMPERATURE) * 24.0f);
+    }
+    
+    /**
+     * Calculate days to reach target maturity at given average temperature
+     * @param currentMaturity Current maturity in °C·h
+     * @param targetMaturity Target maturity in °C·h
+     * @param avgTemperature Average temperature in °C
+     * @return Days to target (or -1 if temperature too low)
+     */
+    public static float calculateDaysToTarget(float currentMaturity, float targetMaturity, float avgTemperature) {
+        float dailyGain = calculateDailyGain(avgTemperature);
+        if (dailyGain <= 0) {
+            return -1.0f; // Temperature too low for curing
+        }
+        
+        float remainingMaturity = targetMaturity - currentMaturity;
+        if (remainingMaturity <= 0) {
+            return 0.0f; // Target already reached
+        }
+        
+        return remainingMaturity / dailyGain;
+    }
+    
+    /**
+     * Calculate days to reach design strength (28 MPa) at given average temperature
+     * @param currentMaturity Current maturity in °C·h
+     * @param avgTemperature Average temperature in °C
+     * @return Days to design strength
+     */
+    public static float calculateDaysToDesignStrength(float currentMaturity, float avgTemperature) {
+        return calculateDaysToTarget(currentMaturity, TARGET_MATURITY_DESIGN, avgTemperature);
+    }
+    
+    /**
+     * Calculate days to reach full strength (40 MPa) at given average temperature
+     * @param currentMaturity Current maturity in °C·h
+     * @param avgTemperature Average temperature in °C
+     * @return Days to full strength
+     */
+    public static float calculateDaysToFullStrength(float currentMaturity, float avgTemperature) {
+        return calculateDaysToTarget(currentMaturity, TARGET_MATURITY_FULL, avgTemperature);
+    }
+    
+    /**
+     * Get target maturity for early strength (10 MPa)
+     * @return Target maturity in °C·h
+     */
+    public static float getEarlyStrengthTarget() {
+        return TARGET_MATURITY_EARLY;
+    }
+    
+    /**
+     * Get target maturity for design strength (28 MPa)
+     * @return Target maturity in °C·h
+     */
+    public static float getDesignStrengthTarget() {
+        return TARGET_MATURITY_DESIGN;
+    }
+    
+    /**
+     * Get target maturity for high strength (35 MPa)
+     * @return Target maturity in °C·h
+     */
+    public static float getHighStrengthTarget() {
+        return TARGET_MATURITY_HIGH;
+    }
+    
+    /**
+     * Get target maturity for full strength (40 MPa)
+     * @return Target maturity in °C·h
+     */
+    public static float getFullStrengthTarget() {
+        return TARGET_MATURITY_FULL;
     }
     
     /**

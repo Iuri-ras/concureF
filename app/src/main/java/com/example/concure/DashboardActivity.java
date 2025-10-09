@@ -1,8 +1,10 @@
 package com.example.concure;
 
+import android.Manifest;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
@@ -13,6 +15,10 @@ import android.view.View;
 import android.view.animation.DecelerateInterpolator;
 import android.widget.Toast;
 import android.animation.ValueAnimator;
+
+import androidx.core.app.ActivityCompat;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.NotificationCompat;
@@ -37,6 +43,7 @@ import com.github.mikephil.charting.data.LineDataSet;
 import com.github.mikephil.charting.formatter.ValueFormatter;
 
 import java.text.DateFormat;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
@@ -68,11 +75,15 @@ public class DashboardActivity extends AppCompatActivity implements
     // Threading
     private ExecutorService executor;
     private Handler mainHandler;
+    private Handler chartUpdateHandler;
+    private Runnable chartUpdateRunnable;
     
     // Data
     private List<SensorReading> chartData;
     private CuringSession activeSession;
     private SensorReading lastReading;
+    private boolean hasReceivedData = false;
+    private long lastDataReceivedTime = 0;
     private int batteryLevel = -1; // -1 means unknown/disconnected
     
     // Performance optimization for curing calculations
@@ -84,6 +95,9 @@ public class DashboardActivity extends AppCompatActivity implements
     private LineDataSet temperatureDataSet;
     private LineDataSet humidityDataSet;
     private LineData lineData;
+    
+    // Permission request launcher
+    private ActivityResultLauncher<String[]> permissionLauncher;
     
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -113,6 +127,9 @@ public class DashboardActivity extends AppCompatActivity implements
             createNotificationChannel();
             loadExistingData();
             
+            // Check permissions after UI is set up (non-blocking)
+            checkPermissionsAfterStartup();
+            
         } catch (Exception e) {
             Log.e(TAG, "Error in onCreate: " + e.getMessage(), e);
             Toast.makeText(this, "Error initializing app: " + e.getMessage(), Toast.LENGTH_LONG).show();
@@ -132,16 +149,26 @@ public class DashboardActivity extends AppCompatActivity implements
             bleManager.setOnConnectionStatusListener(this);
             
             // Database
+            try {
             database = AppDatabase.getDatabase(this);
             sensorReadingDao = database.sensorReadingDao();
             curingSessionDao = database.curingSessionDao();
+                Log.d(TAG, "Database initialized successfully");
+            } catch (Exception e) {
+                Log.e(TAG, "Database initialization failed: " + e.getMessage(), e);
+                throw new RuntimeException("Failed to initialize database", e);
+            }
             
             // Threading
             executor = Executors.newSingleThreadExecutor();
             mainHandler = new Handler(Looper.getMainLooper());
+            chartUpdateHandler = new Handler(Looper.getMainLooper());
             
             // Data
             chartData = new ArrayList<>();
+            
+            // Setup permission launcher
+            setupPermissionLauncher();
         } catch (Exception e) {
             Log.e(TAG, "Error in initializeComponents: " + e.getMessage(), e);
             throw e;
@@ -167,14 +194,11 @@ public class DashboardActivity extends AppCompatActivity implements
             // Test battery parsing logic
             testBatteryParsing();
             
-            // Add sample data for testing chart
-            addSampleChartData();
+            // Initialize with empty data - everything starts from zero
+            Log.d(TAG, "Initializing with empty data - waiting for ESP32 connection");
             
-            // Test battery color changes
-            testBatteryColors();
-            
-            // Start a test curing session
-            startTestCuringSession();
+            // Initialize UI with empty state
+            initializeEmptyState();
             
             // Setup bottom navigation
             if (binding.bottomNavigation != null) {
@@ -211,6 +235,23 @@ public class DashboardActivity extends AppCompatActivity implements
             
             LineChart chart = binding.trendChart;
             
+            // Initialize chart with default data to prevent crashes
+            if (chart.getData() == null) {
+                Log.d(TAG, "Initializing chart with empty data");
+                LineData emptyData = new LineData();
+                chart.setData(emptyData);
+            }
+            
+            // Set default axis ranges to prevent negative array issues
+            YAxis defaultAxis = chart.getAxisLeft();
+            defaultAxis.setAxisMinimum(0f);
+            defaultAxis.setAxisMaximum(100f);
+            defaultAxis.setGranularity(10f);
+            
+            // Ensure chart has valid dimensions
+            chart.setMinimumWidth(200);
+            chart.setMinimumHeight(200);
+            
             // Configure chart appearance
             chart.setBackgroundColor(Color.WHITE);
             chart.getDescription().setEnabled(false);
@@ -220,21 +261,34 @@ public class DashboardActivity extends AppCompatActivity implements
             chart.setPinchZoom(true);
             chart.setDrawGridBackground(false);
             
-            // Configure X-axis
+            // Configure X-axis (time in seconds)
             XAxis xAxis = chart.getXAxis();
             xAxis.setPosition(XAxis.XAxisPosition.BOTTOM);
-            xAxis.setDrawGridLines(false);
-            xAxis.setValueFormatter(new TimeValueFormatter());
+            xAxis.setDrawGridLines(true);
+            xAxis.setGridColor(Color.LTGRAY);
+            xAxis.setValueFormatter(new TimeIntervalValueFormatter());
+            xAxis.setGranularity(2f); // 2-second intervals
+            xAxis.setLabelCount(6, true);
+            // Set default range for time (0-30 seconds)
+            xAxis.setAxisMinimum(0f);
+            xAxis.setAxisMaximum(30f); // Default to show 30 seconds (15 data points)
             
-            // Configure Y-axis with auto-scaling
+            // Configure Y-axis (sensor values)
             YAxis leftAxis = chart.getAxisLeft();
             leftAxis.setDrawGridLines(true);
+            leftAxis.setGridColor(Color.LTGRAY);
             leftAxis.setAxisMinimum(0f);
             leftAxis.setAxisMaximum(100f);
-            leftAxis.setGranularity(5f);
+            leftAxis.setGranularity(10f);
             leftAxis.setLabelCount(6, true);
             leftAxis.setSpaceTop(10f);
             leftAxis.setSpaceBottom(10f);
+            leftAxis.setValueFormatter(new ValueFormatter() {
+                @Override
+                public String getFormattedValue(float value) {
+                    return String.format(Locale.getDefault(), "%.1f", value);
+                }
+            });
             
             YAxis rightAxis = chart.getAxisRight();
             rightAxis.setEnabled(false);
@@ -243,17 +297,23 @@ public class DashboardActivity extends AppCompatActivity implements
             temperatureDataSet = new LineDataSet(new ArrayList<Entry>(), "Temperature (°C)");
             temperatureDataSet.setColor(Color.parseColor("#1976D2"));
             temperatureDataSet.setCircleColor(Color.parseColor("#1976D2"));
-            temperatureDataSet.setLineWidth(3f);
-            temperatureDataSet.setCircleRadius(4f);
+            temperatureDataSet.setLineWidth(4f); // Thicker lines for better visibility
+            temperatureDataSet.setCircleRadius(5f); // Larger circles for better visibility
             temperatureDataSet.setDrawValues(false);
+            temperatureDataSet.setDrawCircles(true); // Ensure circles are drawn
+            temperatureDataSet.setDrawFilled(false); // Don't fill under line
+            temperatureDataSet.setMode(LineDataSet.Mode.LINEAR); // Ensure linear mode
             temperatureDataSet.setAxisDependency(YAxis.AxisDependency.LEFT);
             
             humidityDataSet = new LineDataSet(new ArrayList<Entry>(), "Humidity (%)");
             humidityDataSet.setColor(Color.parseColor("#00796B"));
             humidityDataSet.setCircleColor(Color.parseColor("#00796B"));
-            humidityDataSet.setLineWidth(3f);
-            humidityDataSet.setCircleRadius(4f);
+            humidityDataSet.setLineWidth(4f); // Thicker lines for better visibility
+            humidityDataSet.setCircleRadius(5f); // Larger circles for better visibility
             humidityDataSet.setDrawValues(false);
+            humidityDataSet.setDrawCircles(true); // Ensure circles are drawn
+            humidityDataSet.setDrawFilled(false); // Don't fill under line
+            humidityDataSet.setMode(LineDataSet.Mode.LINEAR); // Ensure linear mode
             humidityDataSet.setAxisDependency(YAxis.AxisDependency.LEFT);
             
             // Create line data
@@ -337,8 +397,19 @@ public class DashboardActivity extends AppCompatActivity implements
                     // Load recent sensor readings
                     List<SensorReading> recentReadings = sensorReadingDao.getRecentReadings(100);
                     mainHandler.post(() -> {
+                        // Clear existing chart data and start fresh
+                        if (temperatureDataSet != null) {
+                            temperatureDataSet.clear();
+                        }
+                        if (humidityDataSet != null) {
+                            humidityDataSet.clear();
+                        }
+                        
+                        // Set new data
                         chartData.clear();
                         chartData.addAll(recentReadings);
+                        
+                        // Update chart with existing data
                         updateChart();
                     });
                     
@@ -513,6 +584,9 @@ public class DashboardActivity extends AppCompatActivity implements
             // Test with simulated ESP32 data
             testEsp32DataFlow();
             
+            // Create a sample curing session for testing
+            createSampleCuringSession();
+            
             Log.d(TAG, "=== END SAMPLE CHART DATA ===");
         } catch (Exception e) {
             Log.e(TAG, "Error adding sample chart data: " + e.getMessage(), e);
@@ -614,6 +688,251 @@ public class DashboardActivity extends AppCompatActivity implements
     }
     
     /**
+     * Initialize UI with empty state (no data, no active session)
+     */
+    private void initializeEmptyState() {
+        try {
+            Log.d(TAG, "=== INITIALIZING EMPTY STATE ===");
+            
+            // Clear any existing data
+            chartData.clear();
+            
+            // Add a few sample data points to test chart visibility
+            addSampleDataForTesting();
+            
+            // Hide progress section
+            if (binding.progressSection != null) {
+                binding.progressSection.setVisibility(View.GONE);
+            }
+            
+            // Disable start curing button until connected
+            if (binding.startCuringButton != null) {
+                binding.startCuringButton.setEnabled(false);
+                binding.startCuringButton.setText("Connect ESP32 First");
+            }
+            
+            // Update chart with sample data
+            updateChart();
+            
+            // Start continuous chart updates every 2 seconds
+            startChartUpdateInterval();
+            
+            Log.d(TAG, "Empty state initialized with sample data - waiting for ESP32 connection");
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Error initializing empty state: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Add sample data for testing chart visibility
+     */
+    private void addSampleDataForTesting() {
+        try {
+            // Add 10 sample data points to test chart lines (0s to 18s)
+            for (int i = 0; i < 10; i++) {
+                SensorReading sampleReading = new SensorReading();
+                // Create realistic temperature and humidity variations
+                float tempVariation = (float) Math.sin(i * 0.3) * 2.0f; // Sine wave variation
+                float humVariation = (float) Math.cos(i * 0.2) * 3.0f; // Cosine wave variation
+                
+                sampleReading.setTemperature(24.5f + tempVariation); // 24.5°C ± 2°C
+                sampleReading.setHumidity(61.0f + humVariation); // 61.0% ± 3%
+                sampleReading.setTimestamp(System.currentTimeMillis() - ((9 - i) * 2000)); // 18s, 16s, 14s, 12s, 10s, 8s, 6s, 4s, 2s, 0s ago
+                chartData.add(sampleReading);
+            }
+            Log.d(TAG, "Added " + chartData.size() + " sample data points for testing (0s to 18s)");
+        } catch (Exception e) {
+            Log.e(TAG, "Error adding sample data: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Add a new data point every 2 seconds to simulate continuous progression
+     */
+    private void addContinuousDataPoint() {
+        try {
+            if (chartData == null) {
+                chartData = new ArrayList<>();
+            }
+            
+            // Get the last data point or create a baseline
+            SensorReading lastReading = null;
+            if (!chartData.isEmpty()) {
+                lastReading = chartData.get(chartData.size() - 1);
+            }
+            
+            // Create new data point
+            SensorReading newReading = new SensorReading();
+            
+            if (lastReading != null) {
+                // Add small variations to the last reading
+                float tempVariation = (float) (Math.random() - 0.5) * 0.5f; // ±0.25°C variation
+                float humVariation = (float) (Math.random() - 0.5) * 1.0f; // ±0.5% variation
+                
+                newReading.setTemperature(lastReading.getTemperature() + tempVariation);
+                newReading.setHumidity(lastReading.getHumidity() + humVariation);
+            } else {
+                // Baseline values if no previous data
+                newReading.setTemperature(24.5f);
+                newReading.setHumidity(61.0f);
+            }
+            
+            // Set timestamp to current time
+            newReading.setTimestamp(System.currentTimeMillis());
+            
+            // Add to chart data
+            chartData.add(newReading);
+            
+            // Keep only last 50 data points to prevent memory issues
+            if (chartData.size() > 50) {
+                chartData.remove(0);
+            }
+            
+            Log.d(TAG, "Added continuous data point: T=" + newReading.getTemperature() + 
+                  "°C, H=" + newReading.getHumidity() + "%");
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Error adding continuous data point: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Start 2-second chart update interval
+     */
+    private void startChartUpdateInterval() {
+        try {
+            Log.d(TAG, "Starting 2-second chart update interval");
+            
+            // Stop any existing interval
+            stopChartUpdateInterval();
+            
+            // Create new runnable for chart updates
+            chartUpdateRunnable = new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        // Check data flow status
+                        checkDataFlowStatus();
+                        
+                        // Always update chart every 2 seconds, even if no new data
+                        updateChartContinuous();
+                        
+                        // Add a new data point every 2 seconds to simulate continuous progression
+                        addContinuousDataPoint();
+                        
+                        Log.d(TAG, "Chart updated via 2-second interval");
+                        
+                        // Schedule next update in 2 seconds
+                        if (chartUpdateHandler != null) {
+                            chartUpdateHandler.postDelayed(this, 2000);
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error in chart update interval: " + e.getMessage(), e);
+                    }
+                }
+            };
+            
+            // Start the interval
+            if (chartUpdateHandler != null) {
+                chartUpdateHandler.post(chartUpdateRunnable);
+            }
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Error starting chart update interval: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Check if data is still flowing from ESP32 (within last 10 seconds)
+     */
+    private void checkDataFlowStatus() {
+        try {
+            long currentTime = System.currentTimeMillis();
+            long timeSinceLastData = currentTime - lastDataReceivedTime;
+            
+            // If no data received in last 10 seconds, disable start curing button
+            if (hasReceivedData && timeSinceLastData > 10000) {
+                if (binding.startCuringButton != null && binding.startCuringButton.isEnabled()) {
+                    binding.startCuringButton.setEnabled(false);
+                    binding.startCuringButton.setText("Data Stopped - Reconnecting...");
+                    Log.w(TAG, "Data flow stopped - disabling start curing button");
+                }
+            }
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Error checking data flow status: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Stop chart update interval
+     */
+    private void stopChartUpdateInterval() {
+        try {
+            Log.d(TAG, "Stopping chart update interval");
+            
+            if (chartUpdateHandler != null && chartUpdateRunnable != null) {
+                chartUpdateHandler.removeCallbacks(chartUpdateRunnable);
+                chartUpdateRunnable = null;
+            }
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Error stopping chart update interval: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Create a sample curing session for testing
+     */
+    private void createSampleCuringSession() {
+        try {
+            Log.d(TAG, "=== CREATING SAMPLE CURING SESSION ===");
+            
+            executor.execute(() -> {
+                try {
+                    // Check if there's already an active session
+                    CuringSession existingSession = curingSessionDao.getActiveSession();
+                    if (existingSession != null) {
+                        Log.d(TAG, "Active session already exists, using it");
+                        mainHandler.post(() -> {
+                            activeSession = existingSession;
+                            updateCuringUI();
+                        });
+                        return;
+                    }
+                    
+                    // Create a new sample curing session
+                    CuringSession session = new CuringSession();
+                    session.setStartTimestamp(System.currentTimeMillis() - 3600000); // Started 1 hour ago
+                    session.setTargetMaturity(MaturityCalculator.getHighStrengthTarget()); // High strength target (7000)
+                    session.setCurrentMaturity(1500.0f); // Simulate significant progress (about 21% of 7000)
+                    session.setActive(true);
+                    session.setNotes("Sample curing session for testing");
+                    
+                    long sessionId = curingSessionDao.insert(session);
+                    session.setId(sessionId);
+                    
+                    mainHandler.post(() -> {
+                        activeSession = session;
+                        updateCuringUI();
+                        Log.d(TAG, "Sample curing session created with " + session.getCompletionPercentage() + "% progress");
+                        
+                        // Force UI update to show progress immediately
+                        updateCuringUI();
+                    });
+                    
+                } catch (Exception e) {
+                    Log.e(TAG, "Error creating sample curing session: " + e.getMessage(), e);
+                }
+            });
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Error in createSampleCuringSession: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
      * Test battery color changes with different percentages
      */
     private void testBatteryColors() {
@@ -651,10 +970,10 @@ public class DashboardActivity extends AppCompatActivity implements
         try {
             Log.d(TAG, "=== STARTING TEST CURING SESSION ===");
             
-            // Create a test curing session with 7-day target
+            // Create a test curing session with high strength target
             CuringSession testSession = new CuringSession();
             testSession.setStartTimestamp(System.currentTimeMillis());
-            testSession.setTargetMaturity(MaturityCalculator.get7DayTargetMaturity());
+            testSession.setTargetMaturity(MaturityCalculator.getHighStrengthTarget());
             testSession.setCurrentMaturity(0f);
             testSession.setActive(true);
             
@@ -685,13 +1004,12 @@ public class DashboardActivity extends AppCompatActivity implements
             
             Log.d(TAG, "=== SIMULATING CURING PROGRESS ===");
             
-            // Simulate 24 hours of curing at 25°C average temperature
-            // At 25°C with datum temperature of 10°C: (25-10) * 24 = 360 degree-hours
-            float simulatedMaturity = 360.0f;
+            // Simulate some curing progress for testing
+            // At 25°C with datum temperature of 0°C: (25-0) * 24 = 600 degree-hours per day
+            float simulatedMaturity = 1200.0f; // Simulate 2 days of curing
             activeSession.setCurrentMaturity(simulatedMaturity);
             
-            float progress = MaturityCalculator.calculateCompletionPercentage(
-                simulatedMaturity, activeSession.getTargetMaturity());
+            float progress = MaturityCalculator.calculateCompletionPercentage(simulatedMaturity);
             
             // Calculate realistic time estimates
             float avgTemp = 25.0f; // Simulated average temperature
@@ -995,7 +1313,155 @@ public class DashboardActivity extends AppCompatActivity implements
     }
     
     /**
-     * Update the real-time chart
+     * Update chart with continuous data from zero
+     */
+    private void updateChartContinuous() {
+        try {
+            Log.d(TAG, "=== UPDATE CHART CONTINUOUS CALLED ===");
+            Log.d(TAG, "Chart data size: " + chartData.size());
+            Log.d(TAG, "Chart view null: " + (binding.trendChart == null));
+            
+            if (chartData.isEmpty() || binding.trendChart == null) {
+                Log.d(TAG, "Chart update skipped - chartData empty: " + chartData.isEmpty() + 
+                      ", chart null: " + (binding.trendChart == null));
+                return;
+            }
+            
+            // Check if chart is in a valid state
+            if (binding.trendChart.getWidth() <= 0 || binding.trendChart.getHeight() <= 0) {
+                Log.w(TAG, "Chart has invalid dimensions, skipping update");
+                return;
+            }
+            
+            Log.d(TAG, "Updating chart with continuous data from " + chartData.size() + " data points");
+            
+            // Clear existing data sets
+            if (temperatureDataSet != null) {
+                temperatureDataSet.clear();
+            }
+            if (humidityDataSet != null) {
+                humidityDataSet.clear();
+            }
+            
+            // Build continuous data from zero
+            for (int i = 0; i < chartData.size(); i++) {
+                SensorReading reading = chartData.get(i);
+                
+                // Validate reading data
+                if (reading == null) {
+                    Log.w(TAG, "Skipping null reading at index " + i);
+                    continue;
+                }
+                
+                // Use time-based X values (0s, 2s, 4s, 6s...) representing 2-second intervals
+                float xValue = i * 2.0f; // Each data point represents 2 seconds
+                
+                // Validate temperature and humidity values (Y-axis)
+                float temperature = reading.getTemperature();
+                float humidity = reading.getHumidity();
+                
+                // Check for valid numeric values
+                if (Float.isNaN(temperature) || Float.isInfinite(temperature)) {
+                    Log.w(TAG, "Invalid temperature value: " + temperature + " at index " + i);
+                    temperature = 0f;
+                }
+                if (Float.isNaN(humidity) || Float.isInfinite(humidity)) {
+                    Log.w(TAG, "Invalid humidity value: " + humidity + " at index " + i);
+                    humidity = 0f;
+                }
+                
+                // Clamp values to reasonable ranges
+                temperature = Math.max(-50f, Math.min(100f, temperature));
+                humidity = Math.max(0f, Math.min(100f, humidity));
+                
+                // Add entries to create continuous line
+                if (temperatureDataSet != null) {
+                    temperatureDataSet.addEntry(new Entry(xValue, temperature));
+                }
+                if (humidityDataSet != null) {
+                    humidityDataSet.addEntry(new Entry(xValue, humidity));
+                }
+            }
+            
+            Log.d(TAG, "Continuous chart data sets updated - Temp entries: " + 
+                  (temperatureDataSet != null ? temperatureDataSet.getEntryCount() : 0) +
+                  ", Hum entries: " + (humidityDataSet != null ? humidityDataSet.getEntryCount() : 0));
+            
+            // Auto-scale both X and Y axes based on data range
+            if (chartData.size() > 0) {
+                // Auto-scale X-axis (time range in seconds: 0s, 2s, 4s, 6s...)
+                float minX = 0f;
+                float maxX = Math.max(0f, (chartData.size() - 1) * 2.0f); // Convert to seconds
+                float minValue = Float.MAX_VALUE;
+                float maxValue = Float.MIN_VALUE;
+                
+                // Find min/max values from data
+                for (SensorReading reading : chartData) {
+                    if (reading != null) {
+                        float temperature = reading.getTemperature();
+                        float humidity = reading.getHumidity();
+                        
+                        if (!Float.isNaN(temperature) && !Float.isInfinite(temperature)) {
+                            minValue = Math.min(minValue, temperature);
+                            maxValue = Math.max(maxValue, temperature);
+                        }
+                        if (!Float.isNaN(humidity) && !Float.isInfinite(humidity)) {
+                            minValue = Math.min(minValue, humidity);
+                            maxValue = Math.max(maxValue, humidity);
+                        }
+                    }
+                }
+                
+                // Ensure we have valid ranges
+                if (minValue == Float.MAX_VALUE || maxValue == Float.MIN_VALUE) {
+                    minValue = 0f;
+                    maxValue = 100f;
+                }
+                
+                // Add padding to X-axis range
+                float xPadding = Math.max(1f, maxX * 0.1f); // 10% padding, minimum 1
+                minX = Math.max(0f, minX - xPadding);
+                maxX = maxX + xPadding;
+                
+                // Add padding to Y-axis range
+                float valueRange = maxValue - minValue;
+                if (valueRange <= 0) {
+                    valueRange = 10f; // Default value range
+                }
+                float valuePadding = valueRange * 0.1f; // 10% padding
+                minValue = Math.max(0, minValue - valuePadding);
+                maxValue = maxValue + valuePadding;
+                
+                // Update X-axis range (incremental values)
+                XAxis xAxis = binding.trendChart.getXAxis();
+                xAxis.setAxisMinimum(minX);
+                xAxis.setAxisMaximum(maxX);
+                
+                // Update Y-axis range (sensor values)
+                YAxis leftAxis = binding.trendChart.getAxisLeft();
+                leftAxis.setAxisMinimum(minValue);
+                leftAxis.setAxisMaximum(maxValue);
+                
+                Log.d(TAG, "X-axis (data points) auto-scaled to range: " + minX + " - " + maxX);
+                Log.d(TAG, "Y-axis (values) auto-scaled to range: " + minValue + " - " + maxValue);
+            }
+            
+            // Notify chart of data change
+            if (lineData != null) {
+                lineData.notifyDataChanged();
+                binding.trendChart.notifyDataSetChanged();
+                binding.trendChart.invalidate();
+                Log.d(TAG, "Continuous chart invalidated and data changed");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error in updateChartContinuous: " + e.getMessage(), e);
+            // Reset chart to prevent further crashes
+            resetChart();
+        }
+    }
+    
+    /**
+     * Update the real-time chart (for new data points)
      */
     private void updateChart() {
         try {
@@ -1009,22 +1475,61 @@ public class DashboardActivity extends AppCompatActivity implements
                 return;
             }
             
+            // Check if chart is in a valid state
+            if (binding.trendChart.getWidth() <= 0 || binding.trendChart.getHeight() <= 0) {
+                Log.w(TAG, "Chart has invalid dimensions, skipping update");
+                return;
+            }
+            
             Log.d(TAG, "Updating chart with " + chartData.size() + " data points");
             
             // Create new data sets instead of clearing existing ones
             List<Entry> tempEntries = new ArrayList<>();
             List<Entry> humEntries = new ArrayList<>();
             
-            // Add new data points
+            // Validate and add data points
             for (int i = 0; i < chartData.size(); i++) {
                 SensorReading reading = chartData.get(i);
-                float time = (reading.getTimestamp() - chartData.get(0).getTimestamp()) / (1000f * 60f); // Minutes
                 
-                tempEntries.add(new Entry(time, reading.getTemperature()));
-                humEntries.add(new Entry(time, reading.getHumidity()));
+                // Validate reading data
+                if (reading == null) {
+                    Log.w(TAG, "Skipping null reading at index " + i);
+                    continue;
+                }
+                
+                // Use time-based X values (0s, 2s, 4s, 6s...) representing 2-second intervals
+                float xValue = i * 2.0f; // Each data point represents 2 seconds
+                
+                // Validate temperature and humidity values (Y-axis)
+                float temperature = reading.getTemperature();
+                float humidity = reading.getHumidity();
+                
+                // Check for valid numeric values
+                if (Float.isNaN(temperature) || Float.isInfinite(temperature)) {
+                    Log.w(TAG, "Invalid temperature value: " + temperature + " at index " + i);
+                    temperature = 0f;
+                }
+                if (Float.isNaN(humidity) || Float.isInfinite(humidity)) {
+                    Log.w(TAG, "Invalid humidity value: " + humidity + " at index " + i);
+                    humidity = 0f;
+                }
+                
+                // Clamp values to reasonable ranges
+                temperature = Math.max(-50f, Math.min(100f, temperature));
+                humidity = Math.max(0f, Math.min(100f, humidity));
+                
+                // Create entries: X = data point index, Y = sensor value
+                tempEntries.add(new Entry(xValue, temperature));
+                humEntries.add(new Entry(xValue, humidity));
             }
             
-            // Update data sets
+            // Validate that we have valid entries
+            if (tempEntries.isEmpty() || humEntries.isEmpty()) {
+                Log.w(TAG, "No valid entries to display on chart");
+                return;
+            }
+            
+            // Update data sets - clear and rebuild to ensure lines show
             if (temperatureDataSet != null) {
                 temperatureDataSet.clear();
                 for (Entry entry : tempEntries) {
@@ -1041,33 +1546,63 @@ public class DashboardActivity extends AppCompatActivity implements
             Log.d(TAG, "Chart data sets updated - Temp entries: " + tempEntries.size() +
                   ", Hum entries: " + humEntries.size());
             
-            // Auto-scale Y-axis based on data range
+            // Auto-scale both X and Y axes based on data range
             if (!tempEntries.isEmpty() || !humEntries.isEmpty()) {
+                // Auto-scale X-axis (time range in seconds)
+                float minX = 0f;
+                float maxX = Math.max(0f, (tempEntries.size() - 1) * 2.0f); // Convert to seconds
                 float minValue = Float.MAX_VALUE;
                 float maxValue = Float.MIN_VALUE;
                 
                 // Find min/max from both temperature and humidity data
                 for (Entry entry : tempEntries) {
+                    if (!Float.isNaN(entry.getY()) && !Float.isInfinite(entry.getY())) {
                     minValue = Math.min(minValue, entry.getY());
                     maxValue = Math.max(maxValue, entry.getY());
+                    }
                 }
                 for (Entry entry : humEntries) {
+                    if (!Float.isNaN(entry.getY()) && !Float.isInfinite(entry.getY())) {
                     minValue = Math.min(minValue, entry.getY());
                     maxValue = Math.max(maxValue, entry.getY());
+                    }
                 }
                 
-                // Add some padding to the range
-                float range = maxValue - minValue;
-                float padding = range * 0.1f; // 10% padding
-                minValue = Math.max(0, minValue - padding);
-                maxValue = maxValue + padding;
+                // Ensure we have valid ranges
+                if (maxX < 0) {
+                    maxX = 10f; // Default range
+                }
+                if (minValue == Float.MAX_VALUE || maxValue == Float.MIN_VALUE) {
+                    minValue = 0f;
+                    maxValue = 100f;
+                }
                 
-                // Update Y-axis range
+                // Add padding to X-axis range
+                float xPadding = Math.max(1f, maxX * 0.1f); // 10% padding, minimum 1
+                minX = Math.max(0f, minX - xPadding);
+                maxX = maxX + xPadding;
+                
+                // Add padding to value range
+                float valueRange = maxValue - minValue;
+                if (valueRange <= 0) {
+                    valueRange = 10f; // Default value range
+                }
+                float valuePadding = valueRange * 0.1f; // 10% padding
+                minValue = Math.max(0, minValue - valuePadding);
+                maxValue = maxValue + valuePadding;
+                
+                // Update X-axis range (data points)
+                XAxis xAxis = binding.trendChart.getXAxis();
+                xAxis.setAxisMinimum(minX);
+                xAxis.setAxisMaximum(maxX);
+                
+                // Update Y-axis range (sensor values)
                 YAxis leftAxis = binding.trendChart.getAxisLeft();
                 leftAxis.setAxisMinimum(minValue);
                 leftAxis.setAxisMaximum(maxValue);
                 
-                Log.d(TAG, "Y-axis auto-scaled to range: " + minValue + " - " + maxValue);
+                Log.d(TAG, "X-axis (data points) auto-scaled to range: " + minX + " - " + maxX);
+                Log.d(TAG, "Y-axis (values) auto-scaled to range: " + minValue + " - " + maxValue);
             }
             
             // Notify chart of data change
@@ -1076,9 +1611,17 @@ public class DashboardActivity extends AppCompatActivity implements
                 binding.trendChart.notifyDataSetChanged();
                 binding.trendChart.invalidate();
                 Log.d(TAG, "Chart invalidated and data changed");
+                
+                // Force chart to redraw
+                binding.trendChart.post(() -> {
+                    binding.trendChart.invalidate();
+                    Log.d(TAG, "Chart force redraw completed");
+                });
             }
         } catch (Exception e) {
             Log.e(TAG, "Error in updateChart: " + e.getMessage(), e);
+            // Reset chart to prevent further crashes
+            resetChart();
         }
     }
     
@@ -1087,12 +1630,25 @@ public class DashboardActivity extends AppCompatActivity implements
      */
     private void startCuringProcess() {
         try {
+            // Check if ESP32 is connected and receiving data
+            if (!bleManager.isConnected()) {
+                Toast.makeText(this, "Please connect to ESP32 first", Toast.LENGTH_LONG).show();
+                Log.w(TAG, "Cannot start curing - ESP32 not connected");
+                return;
+            }
+            
+            if (!hasReceivedData) {
+                Toast.makeText(this, "Please wait for sensor data from ESP32", Toast.LENGTH_LONG).show();
+                Log.w(TAG, "Cannot start curing - no data received from ESP32 yet");
+                return;
+            }
+            
             executor.execute(() -> {
                 try {
                     CuringSession session = new CuringSession();
                     session.setStartTimestamp(System.currentTimeMillis());
-                    // Use 7-day target for faster testing (300 degree-hours)
-                    session.setTargetMaturity(MaturityCalculator.get7DayTargetMaturity());
+                    // Use high strength target (7000 degree-hours)
+                    session.setTargetMaturity(MaturityCalculator.getHighStrengthTarget());
                     session.setCurrentMaturity(0f);
                     session.setActive(true);
                     
@@ -1102,7 +1658,7 @@ public class DashboardActivity extends AppCompatActivity implements
                     mainHandler.post(() -> {
                         activeSession = session;
                         updateCuringUI();
-                        Toast.makeText(this, "Curing process started (7-day target)", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(this, "Curing process started (high strength target)", Toast.LENGTH_SHORT).show();
                     });
                 } catch (Exception e) {
                     Log.e(TAG, "Error starting curing process: " + e.getMessage(), e);
@@ -1160,10 +1716,13 @@ public class DashboardActivity extends AppCompatActivity implements
                 return;
             }
             
+            Log.d(TAG, "=== UPDATING CURING UI ===");
             Log.d(TAG, "Active session details:");
-            Log.d(TAG, "- Current maturity: " + activeSession.getCurrentMaturity());
-            Log.d(TAG, "- Target maturity: " + activeSession.getTargetMaturity());
+            Log.d(TAG, "- Current maturity: " + activeSession.getCurrentMaturity() + " °C·h");
+            Log.d(TAG, "- Current strength: " + activeSession.getCurrentStrength() + " MPa");
+            Log.d(TAG, "- Target strength: " + MaturityCalculator.getDefaultTargetStrength() + " MPa");
             Log.d(TAG, "- Active: " + activeSession.isActive());
+            Log.d(TAG, "- Completion percentage: " + activeSession.getCompletionPercentage() + "%");
             
             if (binding.progressSection != null) {
                 binding.progressSection.setVisibility(View.VISIBLE);
@@ -1173,8 +1732,17 @@ public class DashboardActivity extends AppCompatActivity implements
             }
             
             // Update progress with smooth animation
+            float currentMaturity = activeSession.getCurrentMaturity();
+            float targetStrength = MaturityCalculator.getDefaultTargetStrength();
+            float currentStrength = MaturityCalculator.calculateStrengthFromMaturity(currentMaturity);
             float progress = activeSession.getCompletionPercentage();
+            
+            Log.d(TAG, "=== PROGRESS CALCULATION DEBUG ===");
+            Log.d(TAG, "Current maturity: " + currentMaturity + " °C·h");
+            Log.d(TAG, "Current strength: " + currentStrength + " MPa");
+            Log.d(TAG, "Target strength: " + targetStrength + " MPa");
             Log.d(TAG, "Calculated progress: " + progress + "%");
+            Log.d(TAG, "=== END PROGRESS DEBUG ===");
             
             if (binding.curingProgressCircle != null) {
                 Log.d(TAG, "Updating progress circle to: " + (int) progress);
@@ -1185,19 +1753,37 @@ public class DashboardActivity extends AppCompatActivity implements
             
             // Update progress text
             if (binding.curingProgressText != null) {
-                binding.curingProgressText.setText(String.format(Locale.getDefault(), "%.1f%%", progress));
+                String progressStr = String.format(Locale.getDefault(), "%.1f%%", progress);
+                binding.curingProgressText.setText(progressStr);
+                Log.d(TAG, "Updated progress text: " + progressStr);
+            } else {
+                Log.e(TAG, "curingProgressText is null!");
             }
             
             // Update maturity values
             if (binding.currentMaturityText != null) {
-                binding.currentMaturityText.setText(String.format(Locale.getDefault(), "%.1f", activeSession.getCurrentMaturity()));
+                String currentMaturityStr = String.format(Locale.getDefault(), "%.1f °C·h", activeSession.getCurrentMaturity());
+                binding.currentMaturityText.setText(currentMaturityStr);
+                Log.d(TAG, "Updated current maturity text: " + currentMaturityStr);
+            } else {
+                Log.e(TAG, "currentMaturityText is null!");
             }
+            
             if (binding.targetMaturityText != null) {
-                binding.targetMaturityText.setText(String.format(Locale.getDefault(), "%.1f", activeSession.getTargetMaturity()));
+                // Use the new high strength target instead of session target
+                float targetMaturity = MaturityCalculator.getHighStrengthTarget();
+                String targetMaturityStr = String.format(Locale.getDefault(), "%.0f °C·h", targetMaturity);
+                binding.targetMaturityText.setText(targetMaturityStr);
+                Log.d(TAG, "Updated target maturity text: " + targetMaturityStr);
+            } else {
+                Log.e(TAG, "targetMaturityText is null!");
             }
             
             // Update completion date with realistic calculation
             updateCompletionDate();
+            
+            // Update prediction card with maturity-based calculations
+            updatePredictionCard();
             
             // Check for 80% completion notification
             if (progress >= 80 && progress < 81) {
@@ -1238,16 +1824,16 @@ public class DashboardActivity extends AppCompatActivity implements
             float avgTemperature = calculateAverageTemperature();
             
             if (avgTemperature > 0) {
-                // Use realistic time estimation based on average temperature
-                float daysToCompletion = MaturityCalculator.estimateDaysToCompletion(
+                // Use proper ASTM C1074 calculation for high strength (35 MPa)
+                float daysToHigh = MaturityCalculator.calculateDaysToTarget(
                     activeSession.getCurrentMaturity(), 
-                    activeSession.getTargetMaturity(), 
+                    MaturityCalculator.getHighStrengthTarget(),
                     avgTemperature
                 );
                 
-                if (daysToCompletion > 0) {
+                if (daysToHigh > 0) {
                     // Calculate completion date
-                    long completionTime = System.currentTimeMillis() + (long)(daysToCompletion * 24 * 60 * 60 * 1000);
+                    long completionTime = System.currentTimeMillis() + (long)(daysToHigh * 24 * 60 * 60 * 1000);
                     java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("MMM dd, yyyy", Locale.getDefault());
                     String dateStr = sdf.format(new Date(completionTime));
                     
@@ -1256,7 +1842,11 @@ public class DashboardActivity extends AppCompatActivity implements
                     }
                     
                     Log.d(TAG, "Completion date calculated: " + dateStr + 
-                          " (" + daysToCompletion + " days at " + avgTemperature + "°C)");
+                          " (" + String.format("%.1f", daysToHigh) + " days to high strength at " + avgTemperature + "°C)");
+                } else if (daysToHigh == 0) {
+                    if (binding.completionDateText != null) {
+                        binding.completionDateText.setText("High strength reached");
+                    }
                 } else {
                     if (binding.completionDateText != null) {
                         binding.completionDateText.setText("Temperature too low");
@@ -1273,14 +1863,131 @@ public class DashboardActivity extends AppCompatActivity implements
     }
     
     /**
+     * Update prediction card with maturity-based calculations
+     */
+    private void updatePredictionCard() {
+        try {
+            if (activeSession == null) return;
+            
+            // Get current maturity and strength
+            float currentMaturity = activeSession.getCurrentMaturity();
+            float currentStrength = activeSession.getCurrentStrength();
+            float targetStrength = MaturityCalculator.getDefaultTargetStrength();
+            float curingPercent = activeSession.getCompletionPercentage();
+            
+            // Calculate 12-hour average temperature for prediction
+            float avgTemperature12h = calculate12HourAverageTemperature();
+            
+            // Calculate daily gain and days to target using proper ASTM C1074 calculations
+            float dailyGain = MaturityCalculator.calculateDailyGain(avgTemperature12h);
+            float daysToHigh = MaturityCalculator.calculateDaysToTarget(currentMaturity, MaturityCalculator.getHighStrengthTarget(), avgTemperature12h);
+            float daysToFull = MaturityCalculator.calculateDaysToFullStrength(currentMaturity, avgTemperature12h);
+            
+            // Predict completion date/time based on high strength (35 MPa)
+            String predictedCompletion = "Calculating...";
+            if (daysToHigh > 0) {
+                // Calculate completion date/time
+                long completionTime = System.currentTimeMillis() + (long)(daysToHigh * 24 * 60 * 60 * 1000);
+                java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("MMM dd, yyyy", Locale.getDefault());
+                predictedCompletion = sdf.format(new Date(completionTime));
+            } else if (daysToHigh == 0) {
+                predictedCompletion = "High strength reached";
+            } else {
+                predictedCompletion = "Temperature too low";
+            }
+            
+            // Update UI elements (if they exist in the layout)
+            // Note: These UI elements may need to be added to the layout
+            Log.d(TAG, "=== PREDICTION CARD UPDATE ===");
+            Log.d(TAG, "Current maturity: " + String.format("%.1f", currentMaturity) + " °C·h");
+            Log.d(TAG, "Current strength: " + String.format("%.1f", currentStrength) + " MPa");
+            Log.d(TAG, "Target strength: " + String.format("%.1f", targetStrength) + " MPa");
+            Log.d(TAG, "Curing percent: " + String.format("%.1f", curingPercent) + "%");
+            Log.d(TAG, "12h avg temp: " + String.format("%.1f", avgTemperature12h) + "°C");
+            Log.d(TAG, "Daily gain: " + String.format("%.1f", dailyGain) + " °C·h/day");
+            Log.d(TAG, "Days to high strength (35 MPa): " + String.format("%.1f", daysToHigh) + " days");
+            Log.d(TAG, "Days to full strength (40 MPa): " + String.format("%.1f", daysToFull) + " days");
+            Log.d(TAG, "Predicted completion: " + predictedCompletion);
+            
+            // TODO: Update actual UI elements when they are added to the layout
+            // Example:
+            // if (binding.currentMaturityCardText != null) {
+            //     binding.currentMaturityCardText.setText(String.format("%.1f °C·h", currentMaturity));
+            // }
+            // if (binding.currentStrengthCardText != null) {
+            //     binding.currentStrengthCardText.setText(String.format("%.1f MPa", currentStrength));
+            // }
+            // if (binding.curingPercentCardText != null) {
+            //     binding.curingPercentCardText.setText(String.format("%.0f%%", curingPercent));
+            // }
+            // if (binding.predictedCompletionCardText != null) {
+            //     binding.predictedCompletionCardText.setText(predictedCompletion);
+            // }
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Error in updatePredictionCard: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Calculate 12-hour average temperature for prediction
+     */
+    private float calculate12HourAverageTemperature() {
+        try {
+            if (chartData == null || chartData.isEmpty()) {
+                return 0.0f;
+            }
+            
+            long currentTime = System.currentTimeMillis();
+            long twelveHoursAgo = currentTime - (12 * 60 * 60 * 1000); // 12 hours in milliseconds
+            
+            float totalTemp = 0.0f;
+            int count = 0;
+            
+            // Get readings from last 12 hours
+            for (SensorReading reading : chartData) {
+                if (reading.getTimestamp() >= twelveHoursAgo) {
+                    totalTemp += reading.getTemperature();
+                    count++;
+                }
+            }
+            
+            if (count > 0) {
+                float avgTemp = totalTemp / count;
+                Log.d(TAG, "12-hour average temperature: " + avgTemp + "°C (from " + count + " readings)");
+                return avgTemp;
+            } else {
+                // Fallback to overall average if no recent data
+                return calculateAverageTemperature();
+            }
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Error calculating 12-hour average temperature: " + e.getMessage(), e);
+            return calculateAverageTemperature();
+        }
+    }
+    
+    /**
      * Process new sensor data
      */
     private void processNewData(SensorReading reading) {
         try {
             Log.d(TAG, "=== PROCESSING NEW DATA ===");
             
+            // Validate reading
+            if (reading == null) {
+                Log.e(TAG, "Reading is null, cannot process");
+                return;
+            }
+            
             if (reading.getTimestamp() == 0) {
-                reading.setTimestamp(System.currentTimeMillis());
+                // Ensure each reading has a unique timestamp
+                long currentTime = System.currentTimeMillis();
+                if (lastReading != null && currentTime <= lastReading.getTimestamp()) {
+                    // If current time is same or earlier than last reading, add 1ms
+                    currentTime = lastReading.getTimestamp() + 1;
+                }
+                reading.setTimestamp(currentTime);
             }
             
             lastReading = reading;
@@ -1294,7 +2001,7 @@ public class DashboardActivity extends AppCompatActivity implements
             
             // Check for duplicate data (within 1 second)
             boolean isDuplicate = false;
-            if (!chartData.isEmpty()) {
+            if (chartData != null && !chartData.isEmpty()) {
                 SensorReading lastChartReading = chartData.get(chartData.size() - 1);
                 if (Math.abs(reading.getTimestamp() - lastChartReading.getTimestamp()) < 1000) {
                     // Replace last entry
@@ -1305,6 +2012,9 @@ public class DashboardActivity extends AppCompatActivity implements
             }
             
             if (!isDuplicate) {
+                if (chartData == null) {
+                    chartData = new ArrayList<>();
+                }
                 chartData.add(reading);
                 Log.d(TAG, "Added new data point. Total points: " + chartData.size());
                 Log.d(TAG, "Chart data now contains " + chartData.size() + " readings");
@@ -1312,18 +2022,40 @@ public class DashboardActivity extends AppCompatActivity implements
                 Log.d(TAG, "Duplicate data point replaced. Total points: " + chartData.size());
             }
             
-            // Update chart
+            // Update chart by appending new data point
             Log.d(TAG, "Calling updateChart() with " + chartData.size() + " data points");
             updateChart();
             
             // Save to database
+            if (executor != null && sensorReadingDao != null) {
             executor.execute(() -> {
                 try {
                     sensorReadingDao.insert(reading);
+                        Log.d(TAG, "Sensor reading saved to database");
                 } catch (Exception e) {
                     Log.e(TAG, "Error saving sensor reading: " + e.getMessage(), e);
                 }
             });
+            } else {
+                Log.w(TAG, "Executor or sensorReadingDao is null, cannot save to database");
+            }
+            
+            // Mark that we've received data and enable start curing button
+            hasReceivedData = true;
+            lastDataReceivedTime = System.currentTimeMillis();
+            
+            // Enable start curing button now that we have data flowing
+            if (binding.startCuringButton != null && !binding.startCuringButton.isEnabled()) {
+                binding.startCuringButton.setEnabled(true);
+                binding.startCuringButton.setText("Start Curing");
+                Log.d(TAG, "Start curing button enabled - data is flowing from ESP32");
+            }
+            
+            // Auto-create curing session if data is flowing and no session exists
+            if (activeSession == null && hasReceivedData) {
+                Log.d(TAG, "Auto-creating curing session since data is flowing");
+                autoCreateCuringSession();
+            }
             
             // Update curing progress if active
             if (activeSession != null) {
@@ -1331,6 +2063,56 @@ public class DashboardActivity extends AppCompatActivity implements
             }
         } catch (Exception e) {
             Log.e(TAG, "Error in processNewData: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Automatically create a curing session when data starts flowing
+     */
+    private void autoCreateCuringSession() {
+        try {
+            Log.d(TAG, "=== AUTO-CREATING CURING SESSION ===");
+            
+            executor.execute(() -> {
+                try {
+                    // Check if there's already an active session
+                    CuringSession existingSession = curingSessionDao.getActiveSession();
+                    if (existingSession != null) {
+                        Log.d(TAG, "Active session already exists, using it");
+                        mainHandler.post(() -> {
+                            activeSession = existingSession;
+                            updateCuringUI();
+                        });
+                        return;
+                    }
+                    
+                    // Create a new curing session
+                    CuringSession session = new CuringSession();
+                    session.setStartTimestamp(System.currentTimeMillis());
+                    session.setTargetMaturity(MaturityCalculator.getHighStrengthTarget()); // High strength target (7000)
+                    session.setCurrentMaturity(0.0f);
+                    session.setActive(true);
+                    
+                    // Save to database
+                    long sessionId = curingSessionDao.insert(session);
+                    session.setId(sessionId);
+                    
+                    Log.d(TAG, "Auto-created curing session with ID: " + sessionId);
+                    Log.d(TAG, "Target maturity: " + session.getTargetMaturity() + " °C·h");
+                    
+                    mainHandler.post(() -> {
+                        activeSession = session;
+                        updateCuringUI();
+                        Log.d(TAG, "Auto-created curing session is now active");
+                    });
+                    
+                } catch (Exception e) {
+                    Log.e(TAG, "Error auto-creating curing session: " + e.getMessage(), e);
+                }
+            });
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Error in autoCreateCuringSession: " + e.getMessage(), e);
         }
     }
     
@@ -1358,18 +2140,27 @@ public class DashboardActivity extends AppCompatActivity implements
                     
                     if (recentReadings.size() < 2) return;
                     
-                    // Calculate total maturity from recent readings
+                    // Calculate total maturity from recent readings using ASTM C1074
                     float totalMaturity = MaturityCalculator.calculateMaturity(recentReadings);
                     
-                    // Only update if there's a significant change (avoid micro-updates)
-                    if (Math.abs(totalMaturity - lastCalculatedMaturity) > 1.0f) {
-                        activeSession.setCurrentMaturity(totalMaturity);
-                        curingSessionDao.updateMaturity(activeSession.getId(), totalMaturity);
-                        lastCalculatedMaturity = totalMaturity;
-                        
-                        mainHandler.post(() -> updateCuringUI());
-                        Log.d(TAG, "Curing progress updated: " + totalMaturity + " maturity points");
-                    }
+                    Log.d(TAG, "=== MATURITY CALCULATION DEBUG ===");
+                    Log.d(TAG, "Recent readings count: " + recentReadings.size());
+                    Log.d(TAG, "Calculated total maturity: " + totalMaturity + " °C·h");
+                    Log.d(TAG, "Last calculated maturity: " + lastCalculatedMaturity + " °C·h");
+                    Log.d(TAG, "Difference: " + Math.abs(totalMaturity - lastCalculatedMaturity));
+                    
+                    // Always update the maturity (remove threshold for debugging)
+                    activeSession.setCurrentMaturity(totalMaturity);
+                    curingSessionDao.updateMaturity(activeSession.getId(), totalMaturity);
+                    lastCalculatedMaturity = totalMaturity;
+                    
+                    Log.d(TAG, "Active session current maturity: " + activeSession.getCurrentMaturity() + " °C·h");
+                    Log.d(TAG, "Active session target maturity: " + activeSession.getTargetMaturity() + " °C·h");
+                    Log.d(TAG, "Session completion percentage: " + activeSession.getCompletionPercentage() + "%");
+                    
+                    mainHandler.post(() -> updateCuringUI());
+                    Log.d(TAG, "Curing progress updated: " + totalMaturity + " °C·h maturity");
+                    Log.d(TAG, "=== END MATURITY DEBUG ===");
                 } catch (Exception e) {
                     Log.e(TAG, "Error updating curing progress: " + e.getMessage(), e);
                 }
@@ -1421,18 +2212,53 @@ public class DashboardActivity extends AppCompatActivity implements
     @Override
     public void onDeviceConnected(String deviceName, String deviceAddress) {
         runOnUiThread(() -> {
+            try {
             Log.d(TAG, "Device connected: " + deviceName + " (" + deviceAddress + ")");
             updateConnectionStatus(true, "Connected to " + deviceName);
+            
+            // Reset data flow detection
+            hasReceivedData = false;
+            lastDataReceivedTime = 0;
+            
+            // Keep start curing button disabled until we receive data
+            if (binding.startCuringButton != null) {
+                binding.startCuringButton.setEnabled(false);
+                binding.startCuringButton.setText("Waiting for Data...");
+            }
+            
+            // Start 2-second chart update interval
+            startChartUpdateInterval();
+            
             Toast.makeText(this, "Connected to " + deviceName, Toast.LENGTH_SHORT).show();
+            } catch (Exception e) {
+                Log.e(TAG, "Error in onDeviceConnected: " + e.getMessage(), e);
+            }
         });
     }
     
     @Override
     public void onDeviceDisconnected() {
         runOnUiThread(() -> {
+            try {
             Log.d(TAG, "onDeviceDisconnected callback triggered");
             updateConnectionStatus(false, "Disconnected");
+            
+            // Reset data flow status and disable start curing button
+            hasReceivedData = false;
+            lastDataReceivedTime = 0;
+            
+            if (binding.startCuringButton != null) {
+                binding.startCuringButton.setEnabled(false);
+                binding.startCuringButton.setText("Connect ESP32 First");
+            }
+            
+            // Stop chart update interval
+            stopChartUpdateInterval();
+            
             Toast.makeText(this, "Disconnected from ESP32", Toast.LENGTH_SHORT).show();
+            } catch (Exception e) {
+                Log.e(TAG, "Error in onDeviceDisconnected: " + e.getMessage(), e);
+            }
         });
     }
     
@@ -1446,7 +2272,13 @@ public class DashboardActivity extends AppCompatActivity implements
                 lastReading = new SensorReading();
             }
             lastReading.setTemperature(temperature);
-            lastReading.setTimestamp(System.currentTimeMillis());
+            
+            // Ensure unique timestamp
+            long newTimestamp = System.currentTimeMillis();
+            if (newTimestamp <= lastReading.getTimestamp()) {
+                newTimestamp = lastReading.getTimestamp() + 1;
+            }
+            lastReading.setTimestamp(newTimestamp);
             updateTemperatureDisplay(lastReading);
         });
     }
@@ -1461,7 +2293,13 @@ public class DashboardActivity extends AppCompatActivity implements
                 lastReading = new SensorReading();
             }
             lastReading.setHumidity(humidity);
-            lastReading.setTimestamp(System.currentTimeMillis());
+            
+            // Ensure unique timestamp
+            long newTimestamp = System.currentTimeMillis();
+            if (newTimestamp <= lastReading.getTimestamp()) {
+                newTimestamp = lastReading.getTimestamp() + 1;
+            }
+            lastReading.setTimestamp(newTimestamp);
             updateHumidityDisplay(lastReading);
         });
     }
@@ -1469,14 +2307,26 @@ public class DashboardActivity extends AppCompatActivity implements
     @Override
     public void onRawDataReceived(String data) {
         runOnUiThread(() -> {
+            try {
             Log.d(TAG, "Raw data received: " + data);
+                
+                // Validate data
+                if (data == null || data.trim().isEmpty()) {
+                    Log.w(TAG, "Received null or empty data");
+                    return;
+                }
+                
             Log.d(TAG, "Data length: " + data.length());
             
-            try {
                 // Handle new ESP32 format: "T:24.1", "H:59.6", "B:82"
                 if (data.startsWith("T:")) {
                     // Parse temperature
                     String tempStr = data.substring(2).trim();
+                    if (tempStr.isEmpty()) {
+                        Log.w(TAG, "Empty temperature string");
+                        return;
+                    }
+                    
                     float temperature = Float.parseFloat(tempStr);
                     Log.d(TAG, "Temperature received: " + temperature + "°C");
                     
@@ -1484,7 +2334,13 @@ public class DashboardActivity extends AppCompatActivity implements
                         lastReading = new SensorReading();
                     }
                     lastReading.setTemperature(temperature);
-                    lastReading.setTimestamp(System.currentTimeMillis());
+                    
+                    // Ensure unique timestamp
+                    long newTimestamp = System.currentTimeMillis();
+                    if (newTimestamp <= lastReading.getTimestamp()) {
+                        newTimestamp = lastReading.getTimestamp() + 1;
+                    }
+                    lastReading.setTimestamp(newTimestamp);
                     updateTemperatureDisplay(lastReading);
                     
                     // Process the data for chart and curing calculations
@@ -1493,6 +2349,11 @@ public class DashboardActivity extends AppCompatActivity implements
                 } else if (data.startsWith("H:")) {
                     // Parse humidity
                     String humStr = data.substring(2).trim();
+                    if (humStr.isEmpty()) {
+                        Log.w(TAG, "Empty humidity string");
+                        return;
+                    }
+                    
                     float humidity = Float.parseFloat(humStr);
                     Log.d(TAG, "Humidity received: " + humidity + "%");
                     
@@ -1500,7 +2361,13 @@ public class DashboardActivity extends AppCompatActivity implements
                         lastReading = new SensorReading();
                     }
                     lastReading.setHumidity(humidity);
-                    lastReading.setTimestamp(System.currentTimeMillis());
+                    
+                    // Ensure unique timestamp
+                    long newTimestamp = System.currentTimeMillis();
+                    if (newTimestamp <= lastReading.getTimestamp()) {
+                        newTimestamp = lastReading.getTimestamp() + 1;
+                    }
+                    lastReading.setTimestamp(newTimestamp);
                     updateHumidityDisplay(lastReading);
                     
                     // Process the data for chart and curing calculations
@@ -1509,6 +2376,11 @@ public class DashboardActivity extends AppCompatActivity implements
                 } else if (data.startsWith("B:")) {
                     // Parse battery
                     String batteryStr = data.substring(2).trim();
+                    if (batteryStr.isEmpty()) {
+                        Log.w(TAG, "Empty battery string");
+                        return;
+                    }
+                    
                     int battery = Integer.parseInt(batteryStr);
                     batteryLevel = battery;
                     Log.d(TAG, "Battery received: " + battery + "%");
@@ -1520,6 +2392,8 @@ public class DashboardActivity extends AppCompatActivity implements
                 
             } catch (NumberFormatException e) {
                 Log.e(TAG, "Error parsing sensor data: " + data, e);
+            } catch (StringIndexOutOfBoundsException e) {
+                Log.e(TAG, "Error parsing data format: " + data, e);
             } catch (Exception e) {
                 Log.e(TAG, "Error processing data: " + data, e);
             }
@@ -1530,8 +2404,12 @@ public class DashboardActivity extends AppCompatActivity implements
     @Override
     public void onConnectionStatusChanged(boolean isConnected, String status) {
         runOnUiThread(() -> {
+            try {
             Log.d(TAG, "onConnectionStatusChanged callback triggered: " + isConnected + " - " + status);
             updateConnectionStatus(isConnected, status);
+            } catch (Exception e) {
+                Log.e(TAG, "Error in onConnectionStatusChanged: " + e.getMessage(), e);
+            }
         });
     }
     
@@ -1539,12 +2417,35 @@ public class DashboardActivity extends AppCompatActivity implements
     protected void onResume() {
         super.onResume();
         try {
-            boolean isConnected = bleManager.isConnected();
-            String deviceName = bleManager.getConnectedDeviceName();
+            // Check if BLE manager is properly initialized
+            if (bleManager == null) {
+                Log.e(TAG, "BLE Manager is null in onResume");
+                return;
+            }
+            
+            // Safely check connection status
+            boolean isConnected = false;
+            String deviceName = "";
+            try {
+                isConnected = bleManager.isConnected();
+                deviceName = bleManager.getConnectedDeviceName();
+                if (deviceName == null) {
+                    deviceName = "";
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Error checking BLE connection status: " + e.getMessage(), e);
+                isConnected = false;
+                deviceName = "";
+            }
+            
             String status = isConnected ? "Connected to " + deviceName : "Disconnected";
             updateConnectionStatus(isConnected, status);
+            
+            Log.d(TAG, "onResume - Connection status updated: " + status);
         } catch (Exception e) {
             Log.e(TAG, "Error in onResume: " + e.getMessage(), e);
+            // Set to disconnected state as fallback
+            updateConnectionStatus(false, "Disconnected");
         }
     }
     
@@ -1552,6 +2453,9 @@ public class DashboardActivity extends AppCompatActivity implements
     protected void onDestroy() {
         super.onDestroy();
         try {
+            // Stop chart update interval
+            stopChartUpdateInterval();
+            
             if (executor != null) {
                 executor.shutdown();
             }
@@ -1561,7 +2465,130 @@ public class DashboardActivity extends AppCompatActivity implements
     }
     
     /**
-     * Custom time formatter for chart X-axis
+     * Setup permission request launcher
+     */
+    private void setupPermissionLauncher() {
+        permissionLauncher = registerForActivityResult(
+                new ActivityResultContracts.RequestMultiplePermissions(),
+                result -> {
+                    boolean allGranted = true;
+                    for (Boolean granted : result.values()) {
+                        if (!granted) {
+                            allGranted = false;
+                            break;
+                        }
+                    }
+                    
+                    if (allGranted) {
+                        Log.d(TAG, "All permissions granted");
+                        Toast.makeText(this, "Permissions granted! You can now use BLE features.", Toast.LENGTH_SHORT).show();
+                    } else {
+                        Log.d(TAG, "Some permissions were denied");
+                        Toast.makeText(this, "Some permissions were denied. BLE features may not work properly.", Toast.LENGTH_LONG).show();
+                    }
+                }
+        );
+    }
+    
+    /**
+     * Check permissions after app startup (non-blocking)
+     */
+    private void checkPermissionsAfterStartup() {
+        if (!hasRequiredPermissions()) {
+            Log.d(TAG, "Requesting BLE permissions");
+            requestPermissions();
+        } else {
+            Log.d(TAG, "All permissions already granted");
+        }
+    }
+    
+    /**
+     * Request required permissions
+     */
+    private void requestPermissions() {
+        String[] permissions = {
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.ACCESS_FINE_LOCATION
+        };
+        permissionLauncher.launch(permissions);
+    }
+    
+    /**
+     * Check if all required permissions are granted
+     */
+    private boolean hasRequiredPermissions() {
+        return ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED &&
+               ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
+               ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+    }
+    
+    /**
+     * Safely reset chart to prevent crashes
+     */
+    private void resetChart() {
+        try {
+            if (binding.trendChart != null) {
+                binding.trendChart.clear();
+                binding.trendChart.setData(new LineData());
+                
+                // Reset axis ranges to defaults
+                XAxis xAxis = binding.trendChart.getXAxis();
+                xAxis.setAxisMinimum(0f);
+                xAxis.setAxisMaximum(30f); // Default to show 30 seconds (15 data points)
+                
+                YAxis leftAxis = binding.trendChart.getAxisLeft();
+                leftAxis.setAxisMinimum(0f);
+                leftAxis.setAxisMaximum(100f);
+                
+                binding.trendChart.invalidate();
+                Log.d(TAG, "Chart reset successfully");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error resetting chart: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Custom time interval formatter for chart X-axis (2-second intervals)
+     */
+    private class TimeIntervalValueFormatter extends ValueFormatter {
+        @Override
+        public String getFormattedValue(float value) {
+            // Show time in seconds (0s, 2s, 4s, 6s...)
+            return String.format(Locale.getDefault(), "%.0fs", value);
+        }
+    }
+    
+    /**
+     * Custom data point formatter for chart X-axis (legacy)
+     */
+    private class DataPointValueFormatter extends ValueFormatter {
+        @Override
+        public String getFormattedValue(float value) {
+            // Simply show the data point number
+            return String.format(Locale.getDefault(), "%.0f", value);
+        }
+    }
+    
+    /**
+     * Custom timestamp formatter for chart X-axis (legacy)
+     */
+    private class TimestampValueFormatter extends ValueFormatter {
+        @Override
+        public String getFormattedValue(float value) {
+            // Convert seconds to milliseconds for Date formatting
+            long timestampMs = (long) (value * 1000);
+            Date date = new Date(timestampMs);
+            
+            // Format as HH:mm:ss
+            SimpleDateFormat sdf = new SimpleDateFormat("HH:mm:ss", Locale.getDefault());
+            return sdf.format(date);
+        }
+    }
+    
+    /**
+     * Custom time formatter for chart X-axis (legacy - for time differences)
      */
     private class TimeValueFormatter extends ValueFormatter {
         @Override

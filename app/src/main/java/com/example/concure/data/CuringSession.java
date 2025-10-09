@@ -82,12 +82,28 @@ public class CuringSession {
     public void setNotes(String notes) { this.notes = notes; }
     
     /**
-     * Calculate the percentage of curing completion
+     * Calculate the percentage of curing completion based on strength achievement
      * @return Percentage (0-100)
      */
     public float getCompletionPercentage() {
-        if (targetMaturity <= 0) return 0;
-        return Math.min(100.0f, (currentMaturity / targetMaturity) * 100.0f);
+        return MaturityCalculator.calculateCuringPercentage(currentMaturity);
+    }
+    
+    /**
+     * Calculate the percentage of curing completion for a specific target strength
+     * @param targetStrength Target strength in MPa
+     * @return Percentage (0-100)
+     */
+    public float getCompletionPercentage(float targetStrength) {
+        return MaturityCalculator.calculateCuringPercentage(currentMaturity, targetStrength);
+    }
+    
+    /**
+     * Get current estimated strength based on maturity
+     * @return Estimated strength in MPa
+     */
+    public float getCurrentStrength() {
+        return MaturityCalculator.calculateStrengthFromMaturity(currentMaturity);
     }
     
     /**
